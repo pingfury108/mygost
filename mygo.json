@@ -1,0 +1,6 @@
+{
+  "name": "mygost",
+  "identifier": "app.mygost.client",
+  "version": "0.1.0",
+  "out": "build"
+}
