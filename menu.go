@@ -23,14 +23,22 @@ func (a *app) setupAppMenu() {
 	}))
 }
 
+// showMain 把主窗口带到前台。
+func (a *app) showMain() {
+	if a.win == nil {
+		return
+	}
+	a.win.Show()
+	a.win.Focus()
+}
+
 // showLogs 切换到日志页（菜单/快捷键共用）。
 func (a *app) showLogs() {
 	if a.win == nil {
 		return
 	}
 	a.win.Update(func() { a.page = "logs" })
-	a.win.Show()
-	a.win.Focus()
+	a.showMain()
 }
 
 // showSettings 切换到设置页。
@@ -39,6 +47,5 @@ func (a *app) showSettings() {
 		return
 	}
 	a.win.Update(func() { a.page = "settings" })
-	a.win.Show()
-	a.win.Focus()
+	a.showMain()
 }

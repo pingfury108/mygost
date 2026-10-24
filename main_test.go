@@ -1,8 +1,11 @@
 package main
 
 import (
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/egoist/mygo"
 
 	"github.com/egoist/mygo/ui"
 	"mygost/internal/proc"
@@ -207,5 +210,64 @@ func TestFormColumnsAligned(t *testing.T) {
 	}
 	if got, want := x("服务器密码（可选）"), x("服务器地址"); got != want {
 		t.Errorf("上游右列未对齐：服务器地址 x=%.1f，服务器密码 x=%.1f", want, got)
+	}
+}
+
+// 悬停提示要包含状态、配置、端口与时长。
+func TestTrayTooltip(t *testing.T) {
+	start := time.Now().Add(-90 * time.Second)
+	got := trayTooltip(true, proc.Running, "hk", ":8027", start)
+	for _, want := range []string{"运行中", "hk", ":8027", "1:30"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("tooltip %q missing %q", got, want)
+		}
+	}
+	if got := trayTooltip(false, proc.Stopped, "", "", time.Time{}); !strings.Contains(got, "未连接") {
+		t.Errorf("stopped tooltip %q", got)
+	}
+	if got := trayTooltip(false, proc.Crashed, "", "", time.Time{}); !strings.Contains(got, "异常") {
+		t.Errorf("crashed tooltip %q", got)
+	}
+}
+
+// 托盘菜单：状态行只读、动作随状态变化、含配置子菜单与日志/设置入口。
+func TestTrayMenuShape(t *testing.T) {
+	a := newTestApp(t)
+	if _, err := a.ps.Save(&profiles.Profile{Name: "hk", Kind: profiles.KindProxy, Listen: ":8027", Proto: "http"}); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+
+	items := a.trayMenuItems(true, proc.Running, "hk", ":8027", start)
+	if !items[0].Disabled || !strings.Contains(items[0].Label, "运行中") {
+		t.Errorf("first item should be a read-only status line: %+v", items[0])
+	}
+	labels := make([]string, 0, len(items))
+	for _, it := range items {
+		labels = append(labels, it.Label)
+	}
+	for _, want := range []string{"断开", "配置", "日志…", "设置…"} {
+		found := false
+		for _, l := range labels {
+			if l == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("menu missing %q: %v", want, labels)
+		}
+	}
+
+	idle := a.trayMenuItems(false, proc.Stopped, "", "", time.Time{})
+	if idle[0].Label != "未连接" {
+		t.Errorf("idle status line %q", idle[0].Label)
+	}
+	if idle[2].Label != "连接" {
+		t.Errorf("idle action %q", idle[2].Label)
+	}
+
+	sub := a.trayProfileItems()
+	if len(sub) < 2 || sub[0].Type != mygo.MenuItemRadio || sub[0].Label != "hk" {
+		t.Errorf("config submenu: %+v", sub)
 	}
 }

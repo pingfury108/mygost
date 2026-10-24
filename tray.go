@@ -6,9 +6,11 @@ import (
 	"image/color"
 	"image/png"
 	"math"
+	"time"
 
 	"github.com/egoist/mygo"
 	"mygost/internal/proc"
+	"mygost/internal/settings"
 )
 
 // setupTray 创建托盘图标（与 app 图标同一标记：隧道拱洞）。
@@ -24,29 +26,94 @@ func (a *app) setupTray() {
 	}
 	a.tray = tray
 	a.refreshTray()
+	a.tickTray()
 }
 
-// refreshTray 按当前进程状态更新托盘菜单与图标。
+// tickTray 运行中每秒刷新一次托盘（菜单栏里的运行时长）。
+func (a *app) tickTray() {
+	go func() {
+		for range time.Tick(time.Second) {
+			if st, _, _ := a.pm.State(); st == proc.Running {
+				a.refreshTray()
+			}
+		}
+	}()
+}
+
+// refreshTray 同步托盘图标、菜单栏文字、提示与菜单。
 func (a *app) refreshTray() {
 	if a.tray == nil {
 		return
 	}
-	state, _, _ := a.pm.State()
+	state, started, _ := a.pm.State()
 	running := state == proc.Running
-	// 运行中实心拱洞，停止时空心
+
+	// 图标：运行中实心拱洞，停止时空心
 	a.tray.SetIcon(trayPNG(running), true)
+
+	name, port := a.trayTarget()
+
+	// 只保留图标：菜单栏文字会让菜单栏显得杂乱，状态放进提示与菜单里
+	// 悬停提示：状态 + 配置 + 端口 + 时长
+	a.tray.SetToolTip(trayTooltip(running, state, name, port, started))
+
+	a.tray.SetMenu(mygo.NewMenu(a.trayMenuItems(running, state, name, port, started)))
+}
+
+// trayTarget 返回当前选中的配置名与端口。
+func (a *app) trayTarget() (name, port string) {
+	if p := a.currentProfile(); p != nil {
+		return p.Name, p.Listen
+	}
+	return "", ""
+}
+
+// trayTooltip 是鼠标悬停时的完整状态。
+func trayTooltip(running bool, state proc.State, name, port string, started time.Time) string {
+	switch {
+	case running:
+		parts := "运行中"
+		if name != "" {
+			parts += " · " + name
+		}
+		if port != "" {
+			parts += " · " + port
+		}
+		if !started.IsZero() {
+			parts += " · " + fmtDuration(time.Since(started))
+		}
+		return "mygost " + parts
+	case state == proc.Crashed:
+		return "mygost 异常退出"
+	default:
+		return "mygost 未连接"
+	}
+}
+
+// trayMenuItems 构建托盘菜单。
+func (a *app) trayMenuItems(running bool, state proc.State, name, port string, started time.Time) []*mygo.MenuItem {
+	// 状态行：只读
+	status := "未连接"
+	switch {
+	case running:
+		status = "运行中 " + fmtDuration(time.Since(started))
+		if name != "" {
+			status += " · " + name
+		}
+		if port != "" {
+			status += " " + port
+		}
+	case state == proc.Crashed:
+		status = "异常退出"
+	}
 
 	action := "连接"
 	if running {
 		action = "断开"
 	}
-	items := []*mygo.MenuItem{
-		{Label: "打开 mygost", Click: func(*mygo.MenuItem, *mygo.Window) {
-			if a.win != nil {
-				a.win.Show()
-				a.win.Focus()
-			}
-		}},
+
+	return []*mygo.MenuItem{
+		{Label: status, Disabled: true},
 		mygo.Separator(),
 		{Label: action, Click: func(*mygo.MenuItem, *mygo.Window) {
 			if running {
@@ -56,9 +123,86 @@ func (a *app) refreshTray() {
 			}
 		}},
 		mygo.Separator(),
+		{Label: "配置", Submenu: a.trayProfileItems()},
+		mygo.Separator(),
+		{Label: "日志…", Accelerator: "CmdOrCtrl+L", Click: func(*mygo.MenuItem, *mygo.Window) {
+			a.showLogs()
+		}},
+		{Label: "设置…", Accelerator: "CmdOrCtrl+,", Click: func(*mygo.MenuItem, *mygo.Window) {
+			a.showSettings()
+		}},
+		mygo.Separator(),
+		{Label: "打开 mygost", Click: func(*mygo.MenuItem, *mygo.Window) {
+			a.showMain()
+		}},
 		{Role: mygo.RoleQuit},
 	}
-	a.tray.SetMenu(mygo.NewMenu(items))
+}
+
+// trayProfileItems 是"配置"子菜单：单选，选中项即运行中/待连接的配置。
+func (a *app) trayProfileItems() []*mygo.MenuItem {
+	items := a.ps.Items()
+	if len(items) == 0 {
+		return []*mygo.MenuItem{{Label: "还没有配置", Disabled: true}}
+	}
+	current := a.st.Get().Current
+	if rid := a.runningProfileID(); rid != "" {
+		current = rid
+	}
+	out := make([]*mygo.MenuItem, 0, len(items)+1)
+	for _, p := range items {
+		p := p
+		out = append(out, &mygo.MenuItem{
+			Label:   p.Name,
+			Type:    mygo.MenuItemRadio,
+			Checked: p.ID == current,
+			Click: func(*mygo.MenuItem, *mygo.Window) {
+				go a.trayConnect(p.ID)
+			},
+		})
+	}
+	out = append(out, mygo.Separator())
+	out = append(out, &mygo.MenuItem{Label: "在窗口中编辑…", Click: func(*mygo.MenuItem, *mygo.Window) {
+		a.showMain()
+	}})
+	return out
+}
+
+// trayConnect 从托盘切换/连接某个配置：
+// 未运行则直接连接；运行其它配置则先停后启，失败回滚原配置。
+func (a *app) trayConnect(id string) {
+	target := a.ps.Get(id)
+	if target == nil {
+		return
+	}
+	bin, _, err := a.loc.Find(a.st.Get().GostPath)
+	if err != nil {
+		a.toast("未找到 gost，请先下载", "error")
+		return
+	}
+
+	runningID := a.runningProfileID()
+	oldID := runningID
+	if runningID != "" {
+		if runningID == id {
+			return // 已在运行的就是它
+		}
+		a.pm.StopAndWait(5 * time.Second)
+	}
+
+	a.update(func(s *settings.Settings) { s.Current = id })
+	startErr := a.pm.Start(bin, a.ps.YamlPath(id))
+	if startErr == nil {
+		a.toast("已连接 "+target.Name, "success")
+		return
+	}
+
+	// 回滚到原配置
+	a.update(func(s *settings.Settings) { s.Current = oldID })
+	if oldID != "" {
+		a.pm.Start(bin, a.ps.YamlPath(oldID))
+	}
+	a.toast("切换到 "+target.Name+" 失败："+startErr.Error(), "error")
 }
 
 // trayPNG 绘制 32×32 单色托盘图标：隧道拱洞，运行中实心并带光点。
@@ -76,7 +220,6 @@ func trayPNG(running bool) []byte {
 		halfW  = 9.5
 		wall   = 3.6
 	)
-	// 拱洞：上为半圆，下为直边
 	inArch := func(x, y, w float64) bool {
 		if y < top || y > bottom {
 			return false
@@ -87,7 +230,6 @@ func trayPNG(running bool) []byte {
 		dy := y - (top + w)
 		return (x-cx)*(x-cx)+dy*dy <= w*w
 	}
-	// 中心光点
 	inDot := func(x, y float64) bool {
 		dx, dy := x-cx, y-19.5
 		return dx*dx+dy*dy <= 2.6*2.6
@@ -102,9 +244,9 @@ func trayPNG(running bool) []byte {
 				for sx := 0; sx < ss; sx++ {
 					x := (float64(px*ss+sx) + 0.5) / ss
 					y := (float64(py*ss+sy) + 0.5) / ss
-					hit := inArch(x, y, halfW) && !inArch(x, y, halfW-wall) // 拱壁
+					hit := inArch(x, y, halfW) && !inArch(x, y, halfW-wall)
 					if running {
-						hit = inArch(x, y, halfW) || inDot(x, y) // 实心 + 光点
+						hit = inArch(x, y, halfW) || inDot(x, y)
 					}
 					if hit {
 						covered++
