@@ -88,6 +88,9 @@ func main() {
 	// 应用以中英两种语言书写：框架内建字符串（菜单角色名等）跟随系统语言
 	mygo.App.SetLanguages("en", "zh-Hans")
 	a := newApp()
+	// 已经有一个实例在跑时（比如窗口被收起后再次启动图标），
+	// 把那个实例的窗口叫出来，而不是静默退出让人以为没反应。
+	mygo.App.OnSecondInstance(func([]string, string) { a.showMain() })
 
 	mygo.App.WhenReady(func() {
 		// 菜单/托盘文案跟随系统语言；打一行日志便于排查
@@ -113,6 +116,19 @@ func main() {
 			MinHeight: 520,
 			Content:   ui.View(a.view),
 		})
+		// 关窗口只是收起：应用继续待在菜单栏，gost 也继续运行。
+		// 真正退出走菜单栏「退出 mygost」（⌘Q）。
+		a.win.OnClose(func(e *mygo.CloseEvent) {
+			e.PreventDefault()
+			a.win.Hide()
+		})
+		// 点 Dock 图标时把窗口叫回来（macOS 无可见窗口时）
+		mygo.App.OnActivate(func(hasVisibleWindows bool) {
+			if !hasVisibleWindows {
+				a.showMain()
+			}
+		})
+
 		a.setupTray()
 		a.refreshTray()
 		a.setupAppMenu()
