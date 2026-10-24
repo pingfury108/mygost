@@ -67,8 +67,36 @@ func TestManagerStartStop(t *testing.T) {
 
 func TestStartWithoutInstall(t *testing.T) {
 	m := NewManager(t.TempDir(), 8103)
+	// 无 IP 列表时必然失败（列表仍需运行时下载）
 	if err := m.Start(context.Background()); err == nil {
-		t.Error("start should fail when plugin is missing")
+		t.Error("start should fail when ip list is missing")
+	}
+}
+
+// 零安装：全新数据目录 + 已有 IP 列表，Start 应自动解压嵌入的插件并跑起来。
+func TestEmbeddedPluginAutoInstall(t *testing.T) {
+	if len(embedded()) == 0 {
+		t.Skip("当前平台未嵌入插件")
+	}
+	dir := t.TempDir()
+	m := NewManager(dir, 8104)
+	if err := os.WriteFile(m.IPListPath(), []byte("10.0.0.0/8\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if m.Installed() != true {
+		t.Fatal("embedded plugin should count as installed")
+	}
+	ctx := context.Background()
+	if err := m.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer m.Stop()
+	if err := m.WaitReady(ctx, 15*time.Second); err != nil {
+		t.Fatalf("plugin not ready: %v", err)
+	}
+	// 二进制应已被解压到数据目录
+	if st, err := os.Stat(m.PluginPath()); err != nil || st.Size() == 0 {
+		t.Fatalf("plugin not extracted: %v", err)
 	}
 }
 

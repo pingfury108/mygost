@@ -117,7 +117,7 @@ func (a *app) trayMenuItems(running bool, state proc.State, name, port string, s
 		mygo.Separator(),
 		{Label: action, Click: func(*mygo.MenuItem, *mygo.Window) {
 			if running {
-				go a.pm.Stop()
+				go a.stopGost()
 			} else {
 				go a.doStart()
 			}

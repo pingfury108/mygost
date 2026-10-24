@@ -2,7 +2,13 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log"
+	"net"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/egoist/mygo/ui"
@@ -208,9 +214,7 @@ func connectGeometry() (button, halo float32) {
 // toggleMain 主按钮：运行则断开，否则连接当前档。
 func (a *app) toggleMain(runningID string) {
 	if runningID != "" {
-		if err := a.pm.Stop(); err != nil {
-			a.toast("停止失败: "+err.Error(), "error")
-		}
+		a.stopGost()
 		return
 	}
 	a.doStart()
@@ -247,6 +251,42 @@ func (a *app) doStart() {
 		}
 	}
 
+	// ① 已有同一个配置的 gost 在跑？直接接管（上次会话残留）
+	if pid, started, ok := a.findOwn(id); ok {
+		if err := a.pm.Attach(pid, started); err != nil {
+			a.toast(tr("接管失败: ", "Attach failed: ")+err.Error(), "error")
+			return
+		}
+		a.toast(tr("已接管上次运行的 gost", "Attached to the running gost"), "success")
+		return
+	}
+
+	// ② 端口被占用：先判断是不是我们自己的另一个配置
+	if p := a.ps.Get(id); p != nil {
+		if addr := probeAddr(p.Listen); addr != "" && portInUse(addr) {
+			port := listenPort(p.Listen)
+			ownerPid, ownerName := proc.PortOwner(port)
+			if ownerName == "" && ownerPid == 0 {
+				a.toast(tr("端口 ", "Port ")+p.Listen+tr(" 已被占用", " is in use"), "error")
+				return
+			}
+			// 占用者是我们启动的 gost（命令行含配置目录）
+			if isOurGost(ownerPid) {
+				a.toast(tr("端口 ", "Port ")+p.Listen+
+					tr(" 被本应用启动的另一个 gost 占用，请先断开它",
+						" is held by another gost started by mygost; disconnect it first"), "error")
+				return
+			}
+			who := ownerName
+			if who == "" {
+				who = fmt.Sprintf("pid %d", ownerPid)
+			}
+			a.toast(tr("端口 ", "Port ")+p.Listen+tr(" 被 ", " is held by ")+who+
+				tr(" 占用", ""), "error")
+			return
+		}
+	}
+
 	// 运行前按当前分流开关重写 yml（保存时的开关可能已变）
 	if p := a.ps.Get(id); p != nil {
 		sc := profiles.SplitConfig{Enabled: s.Split, PluginAddr: a.geoM.Addr(), PrivateMatchers: geo.PrivateMatchers}
@@ -257,10 +297,118 @@ func (a *app) doStart() {
 	}
 	yml := a.ps.YamlPath(id)
 	if err := a.pm.Start(bin, yml); err != nil {
-		a.toast("启动失败: "+err.Error(), "error")
+		a.toast(tr("启动失败: ", "Failed: ")+err.Error(), "error")
 		return
 	}
+	// 启动确认：gost 可能刚起来就因配置/端口问题退出，不能立刻报成功
+	if err := a.pm.WaitStable(800 * time.Millisecond); err != nil {
+		msg := err.Error()
+		var se *proc.StartError
+		if errors.As(err, &se) {
+			msg = se.Detail()
+		}
+		a.toast(tr("启动失败: ", "Failed: ")+msg, "error")
+		return
+	}
+	a.recordPid(id, bin, yml)
 	a.toast(tr("已连接", "Connected"), "success")
+}
+
+// stateDir 存放 PID 等运行期状态。
+func (a *app) stateDir() string { return filepath.Join(dataDir, "state") }
+
+// recordPid 记录本次启动的进程，供下次会话识别/接管。
+func (a *app) recordPid(profileID, bin, yml string) {
+	pid := a.pm.Pid()
+	if pid <= 0 {
+		return
+	}
+	started, _, _ := startedAt(a.pm)
+	rec := proc.Record{PID: pid, Profile: profileID, Config: yml, Binary: bin, Started: started}
+	if err := proc.WritePIDFile(a.stateDir(), rec); err != nil {
+		log.Printf("写 pid 文件失败: %v", err)
+	}
+}
+
+// clearPid 在停止后清理 PID 文件。
+func (a *app) clearPid() { proc.RemovePIDFile(a.stateDir()) }
+
+// findOwn 查找属于本应用的、指定配置的 gost 进程。
+// 先看 PID 文件（权威），再用命令行扫描兜底（覆盖旧版本遗留）。
+func (a *app) findOwn(profileID string) (pid int, started time.Time, ok bool) {
+	yml := a.ps.YamlPath(profileID)
+
+	if rec, valid := proc.ReadPIDFile(a.stateDir()); valid && rec.Config == yml {
+		return rec.PID, rec.Started, true
+	}
+	// 兜底：命令行里带这个配置文件的进程
+	for _, p := range proc.FindByConfig(yml) {
+		return p, time.Time{}, true
+	}
+	return 0, time.Time{}, false
+}
+
+// isOurGost 判断 pid 是否为 mygost 启动的 gost（命令行含 profiles 目录）。
+func isOurGost(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	return proc.CommandlineContains(pid, filepath.Join(dataDir, "profiles"))
+}
+
+// startedAt 返回进程启动时间（接管场景下可能为零值）。
+func startedAt(pm *proc.Manager) (time.Time, bool, bool) {
+	st, started, reason := pm.State()
+	return started, st == proc.Running, reason == ""
+}
+
+// listenPort 从监听地址里取出端口号。
+func listenPort(listen string) int {
+	addr := probeAddr(listen)
+	if addr == "" {
+		return 0
+	}
+	_, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		return 0
+	}
+	p, _ := strconv.Atoi(portStr)
+	return p
+}
+
+// probeAddr 把监听地址转成可探测的 host:port。
+// ":8026" 这类只给端口的写法按本机回环探测。
+func probeAddr(listen string) string {
+	listen = strings.TrimSpace(listen)
+	if listen == "" {
+		return ""
+	}
+	if strings.HasPrefix(listen, ":") {
+		return "127.0.0.1" + listen
+	}
+	if _, _, err := net.SplitHostPort(listen); err != nil {
+		return ""
+	}
+	return listen
+}
+
+// portInUse 报告 addr 是否已被监听。
+func portInUse(addr string) bool {
+	c, err := net.DialTimeout("tcp", addr, 300*time.Millisecond)
+	if err == nil {
+		c.Close()
+		return true
+	}
+	return false
+}
+
+// stopGost 统一停止入口：停进程并清理 PID 记录。
+func (a *app) stopGost() {
+	if err := a.pm.Stop(); err != nil {
+		a.toast(tr("停止失败: ", "Stop failed: ")+err.Error(), "error")
+		return
+	}
+	a.clearPid()
 }
 
 // ensureGeo 确保分流插件运行且规则就绪；规则缺失时自动下载。

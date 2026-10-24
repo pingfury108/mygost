@@ -40,6 +40,10 @@ jobs:
       #   - 导入 Developer ID 证书到临时钥匙串
       #   - 设置 macos.signingIdentity / macos.notarize（见 mygo 文档）
       # 未配置时 mygo 会自动 ad-hoc 签名并跳过公证，仅适合自用测试。
+      # 交叉编译各平台 geo 插件，供 //go:embed 打进 app（不依赖用户安装）
+      - name: 准备嵌入依赖
+        run: ./tools/fetch-deps.sh
+
       - name: 构建 dmg
         run: go tool mygo build -platform "darwin/amd64,darwin/arm64"
 
@@ -66,6 +70,9 @@ jobs:
       # Windows 安装包用 NSIS 在 Linux 上交叉生成
       - name: 安装 NSIS
         run: sudo apt-get update && sudo apt-get install -y nsis
+
+      - name: 准备嵌入依赖
+        run: ./tools/fetch-deps.sh
 
       - name: 构建安装包
         run: go tool mygo build -platform "windows/amd64"

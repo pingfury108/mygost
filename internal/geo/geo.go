@@ -18,6 +18,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"mygost/internal/geobin"
 )
 
 // PluginURL 是 gost-geo-plugin 的 go install 包路径（来源 go-gost 官方）。
@@ -74,10 +76,37 @@ func (m *Manager) Addr() string {
 	return fmt.Sprintf("127.0.0.1:%d", m.port)
 }
 
-// Installed 报告插件是否已就位。
+// Installed 报告插件是否已就位（数据目录或嵌入副本）。
 func (m *Manager) Installed() bool {
-	st, err := os.Stat(m.PluginPath())
-	return err == nil && !st.IsDir()
+	if st, err := os.Stat(m.PluginPath()); err == nil && !st.IsDir() {
+		return true
+	}
+	return len(embedded()) > 0
+}
+
+// embedded 返回构建时嵌入的插件二进制（默认构建恒有）。
+func embedded() []byte { return geobin.Plugin() }
+
+// ensureInstalled 把嵌入的插件写到数据目录（幂等，按大小判断是否需重写）。
+func (m *Manager) ensureInstalled() error {
+	if st, err := os.Stat(m.PluginPath()); err == nil && !st.IsDir() {
+		return nil // 已存在
+	}
+	bin := embedded()
+	if len(bin) == 0 {
+		return fmt.Errorf("插件未嵌入且未安装")
+	}
+	if err := os.MkdirAll(m.dir, 0o755); err != nil {
+		return err
+	}
+	tmp := m.PluginPath() + ".tmp"
+	if err := os.WriteFile(tmp, bin, 0o755); err != nil {
+		return err
+	}
+	if runtime.GOOS != "windows" {
+		_ = os.Chmod(tmp, 0o755)
+	}
+	return os.Rename(tmp, m.PluginPath())
 }
 
 // ListReady 报告规则文件是否已就位。
@@ -100,11 +129,11 @@ func (m *Manager) Start(ctx context.Context) error {
 	if m.cmd != nil && m.cmd.Process != nil {
 		return nil
 	}
-	if !m.Installed() {
-		return fmt.Errorf("geo 插件未安装")
-	}
 	if !m.ListReady() {
 		return fmt.Errorf("IP 列表未下载")
+	}
+	if err := m.ensureInstalled(); err != nil {
+		return err
 	}
 
 	cctx, cancel := context.WithCancel(ctx)
@@ -164,6 +193,9 @@ func (m *Manager) WaitReady(ctx context.Context, timeout time.Duration) error {
 func (m *Manager) UpdateIPList(ctx context.Context, url string) (int, error) {
 	if strings.TrimSpace(url) == "" {
 		url = DefaultIPListURL
+	}
+	if err := os.MkdirAll(m.dir, 0o755); err != nil {
+		return 0, err
 	}
 	var body io.ReadCloser
 	if strings.HasPrefix(url, "file://") {
@@ -266,7 +298,8 @@ func (m *Manager) UpdateAt() time.Time {
 	return st.ModTime()
 }
 
-// InstallFromPath 从本地路径安装插件二进制（用户手动下载或 go install 产物）。
+// InstallFromPath 从本地路径安装插件二进制，覆盖嵌入副本（手动升级用）。
+// 正常情况下无需调用：构建时嵌入的插件会自动解压安装。
 func (m *Manager) InstallFromPath(src string) error {
 	data, err := os.ReadFile(src)
 	if err != nil {

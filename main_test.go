@@ -1,6 +1,7 @@
 package main
 
 import (
+	"net"
 	"strings"
 	"testing"
 	"time"
@@ -305,5 +306,63 @@ func TestMenuLanguage(t *testing.T) {
 	}
 	if en[0].Label == zh[0].Label {
 		t.Error("labels should differ between languages")
+	}
+}
+
+// 端口预检：只给端口的监听地址要能转成回环探测地址。
+func TestProbeAddr(t *testing.T) {
+	cases := map[string]string{
+		":8026":          "127.0.0.1:8026",
+		"127.0.0.1:8080": "127.0.0.1:8080",
+		"0.0.0.0:1080":   "0.0.0.0:1080",
+		"":               "",
+		"garbage":        "",
+	}
+	for in, want := range cases {
+		if got := probeAddr(in); got != want {
+			t.Errorf("probeAddr(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// portInUse：监听中的端口应判定为占用，未监听的端口为否。
+func TestPortInUse(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	if !portInUse(ln.Addr().String()) {
+		t.Error("listening port should be reported in use")
+	}
+	// 关闭后再探测应可用
+	addr := ln.Addr().String()
+	ln.Close()
+	time.Sleep(50 * time.Millisecond)
+	if portInUse(addr) {
+		t.Error("closed port should not be in use")
+	}
+}
+
+// 端口解析：只给端口的监听地址要能得到端口号，用于诊断占用者。
+func TestListenPort(t *testing.T) {
+	cases := map[string]int{
+		":8026":          8026,
+		"127.0.0.1:8080": 8080,
+		"":               0,
+		"garbage":        0,
+	}
+	for in, want := range cases {
+		if got := listenPort(in); got != want {
+			t.Errorf("listenPort(%q) = %d, want %d", in, got, want)
+		}
+	}
+}
+
+// 接管文案：外部进程要标注出来，避免和本会话启动的进程混淆。
+func TestRunningLabelAttached(t *testing.T) {
+	a := newTestApp(t)
+	if got := a.runningLabel("运行中 0:10"); got != "运行中 0:10" {
+		t.Errorf("managed label = %q", got)
 	}
 }

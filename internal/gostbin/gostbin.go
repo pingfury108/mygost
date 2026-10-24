@@ -47,24 +47,38 @@ func binaryName() string {
 	return "gost"
 }
 
-// Find 按优先级查找，source 描述来源（manual/embedded/downloaded/path）。
+// Find 按优先级查找，source 描述来源（manual/downloaded/embedded/path）。
+//
+//	用户指定路径 > 已下载副本 > 构建时内置 > 系统 PATH
+//
+// 已下载副本排在内置之前：用户主动点「下载/更新」应当生效，
+// 否则内置版本会永远盖住它。
 func (l *Locator) Find(manualPath string) (path, source string, err error) {
 	if manualPath != "" {
 		if st, e := os.Stat(manualPath); e == nil && !st.IsDir() {
 			return manualPath, "manual", nil
 		}
 	}
-	if p, ok := ensureEmbedded(l.Dir); ok {
-		return p, "embedded", nil
-	}
-	p := filepath.Join(l.Dir, binaryName())
-	if st, e := os.Stat(p); e == nil && !st.IsDir() {
+	if p := l.downloadedPath(); p != "" {
 		return p, "downloaded", nil
+	}
+	if p, ok := l.ensureEmbedded(); ok {
+		return p, "embedded", nil
 	}
 	if p, e := exec.LookPath("gost"); e == nil {
 		return p, "path", nil
 	}
 	return "", "", ErrNotFound
+}
+
+// downloadedPath 返回已下载副本的路径（不存在时为空）。
+// 兼容旧布局：早期版本把下载的二进制直接放在 Dir/gost。
+func (l *Locator) downloadedPath() string {
+	p := filepath.Join(l.Dir, binaryName())
+	if st, e := os.Stat(p); e == nil && !st.IsDir() {
+		return p
+	}
+	return ""
 }
 
 // DownloadURL 按模板展开下载地址。

@@ -59,6 +59,8 @@ type app struct {
 	// 主题安装状态（跟随系统深浅色）
 	themeApplied bool
 	themeDark    bool
+	// quitting 置位后放行窗口关闭：否则 OnClose 的 PreventDefault 会卡死 Quit 流程
+	quitting bool
 
 	// 设置页保存反馈（短时提示）
 	savedUntil time.Time
@@ -125,7 +127,12 @@ func main() {
 		})
 		// 关窗口只是收起：应用继续待在菜单栏，gost 也继续运行。
 		// 真正退出走菜单栏「退出 mygost」（⌘Q）。
+		// Quit 流程会关闭所有窗口，此时必须放行，否则退出被卡死
+		// （参见 mygo examples/menubar-native 的同名处理）。
 		a.win.OnClose(func(e *mygo.CloseEvent) {
+			if a.quitting {
+				return
+			}
 			e.PreventDefault()
 			a.win.Hide()
 		})
@@ -145,6 +152,7 @@ func main() {
 		}
 	})
 	mygo.App.OnBeforeQuit(func(e *mygo.QuitEvent) {
+		a.quitting = true // 放行 OnClose 的窗口隐藏拦截
 		if !a.st.Get().KeepOnExit {
 			a.pm.StopAndWait(3 * time.Second)
 		}
@@ -190,6 +198,14 @@ func (a *app) onProcEvent() {
 		return
 	}
 	a.win.Update(func() { a.refreshTray() })
+}
+
+// runningLabel 返回运行状态文案：接管进程额外标注。
+func (a *app) runningLabel(status string) string {
+	if a.pm.ExternalPID() > 0 {
+		return status + tr("（已接管）", " (attached)")
+	}
+	return status
 }
 
 // update 更新设置并落盘。

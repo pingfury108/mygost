@@ -2,3 +2,9 @@
 /.mygo/
 mygo_windows_*.syso
 /mygost
+
+# 构建期生成的第三方插件二进制（./tools/fetch-deps.sh 生成）
+/internal/geobin/gost-geo-plugin_*
+
+# 构建期生成的 gost 二进制（./tools/fetch-deps.sh 生成）
+/internal/gostbin/gost_*

@@ -3,10 +3,12 @@ package main
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"time"
 
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/ui"
+	"mygost/internal/proc"
 	"mygost/internal/settings"
 )
 
@@ -102,6 +104,19 @@ func (a *app) viewSettings(c *ui.Context) {
 							}
 						})
 					}
+				})
+			})
+
+			// ── 维护 ──
+			card(c).Children(func() {
+				ui.Column(c).FillWidth().Gap(sp3).Children(func() {
+					sectionTitle(c, tr("维护", "Maintenance"))
+					settingRow(c, tr("残留进程", "Leftover processes"),
+						a.leftoverDesc(), func() {
+							if n := len(a.leftovers()); n > 0 {
+								ui.Button(c, tr("全部结束", "Kill all")).OnClick(func() { go a.killLeftovers() })
+							}
+						})
 				})
 			})
 
@@ -216,5 +231,41 @@ func (a *app) updateIPList() {
 		}
 		a.pendingToasts = append(a.pendingToasts,
 			ui.Toast{Title: fmt.Sprintf(tr("已更新 %d 条", "Updated %d entries"), n), Type: "success"})
+	})
+}
+
+// leftovers 返回不属于当前会话、但由本应用启动的 gost 进程。
+func (a *app) leftovers() []int {
+	all := proc.FindByConfig(filepath.Join(dataDir, "profiles"))
+	cur := a.pm.Pid()
+	out := make([]int, 0, len(all))
+	for _, p := range all {
+		if p != cur {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// leftoverDesc 描述残留进程数量。
+func (a *app) leftoverDesc() string {
+	n := len(a.leftovers())
+	if n == 0 {
+		return tr("没有残留进程", "None")
+	}
+	return fmt.Sprintf(tr("%d 个进程未被本会话管理", "%d process(es) not managed by this session"), n)
+}
+
+// killLeftovers 结束所有残留的 gost 进程。
+func (a *app) killLeftovers() {
+	n := 0
+	for _, pid := range a.leftovers() {
+		if err := proc.Terminate(pid); err == nil {
+			n++
+		}
+	}
+	a.win.Update(func() {
+		a.pendingToasts = append(a.pendingToasts,
+			ui.Toast{Title: fmt.Sprintf(tr("已结束 %d 个进程", "Killed %d process(es)"), n), Type: "success"})
 	})
 }

@@ -4,6 +4,8 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -79,4 +81,57 @@ func TestProgressReader(t *testing.T) {
 		t.Errorf("done=%d", pr.done)
 	}
 	_ = time.Now()
+}
+
+// 优先级：已下载副本必须盖过内置版本，否则「下载/更新」永远不生效。
+func TestFindPrefersDownloadedOverEmbedded(t *testing.T) {
+	dir := t.TempDir()
+	l := &Locator{Dir: dir}
+
+	// 先只有内置：应返回 embedded（并解压到 embedded 子目录）
+	p, src, err := l.Find("")
+	if err != nil {
+		t.Skipf("no embedded gost on this platform: %v", err)
+	}
+	if src != "embedded" {
+		t.Fatalf("source = %q, want embedded", src)
+	}
+	if !strings.Contains(p, "embedded") {
+		t.Errorf("embedded copy should live under embedded/: %q", p)
+	}
+
+	// 再放一个"下载副本"：应优先生效
+	dl := filepath.Join(dir, binaryName())
+	if err := os.WriteFile(dl, []byte("fake"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	p2, src2, err := l.Find("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if src2 != "downloaded" || p2 != dl {
+		t.Errorf("downloaded should win: source=%q path=%q", src2, p2)
+	}
+
+	// 手动路径优先级最高
+	manual := filepath.Join(dir, "my-gost")
+	if err := os.WriteFile(manual, []byte("x"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, src3, _ := l.Find(manual); src3 != "manual" {
+		t.Errorf("manual should win, got %q", src3)
+	}
+}
+
+// 内置二进制必须是当前平台的可执行文件。
+func TestEmbeddedGostBinary(t *testing.T) {
+	if len(embeddedArchive) == 0 {
+		t.Skipf("no embedded gost for %s/%s", runtime.GOOS, runtime.GOARCH)
+	}
+	if len(embeddedArchive) < 5*1024*1024 {
+		t.Fatalf("embedded gost archive too small: %d bytes（先跑 ./tools/fetch-deps.sh）", len(embeddedArchive))
+	}
+	if EmbeddedVersion() == "" {
+		t.Error("EmbeddedVersion should be set when embedded")
+	}
 }
