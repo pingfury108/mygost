@@ -8,6 +8,7 @@ import (
 	"github.com/egoist/mygo"
 
 	"github.com/egoist/mygo/ui"
+	"mygost/internal/geo"
 	"mygost/internal/proc"
 	"mygost/internal/profiles"
 	"mygost/internal/settings"
@@ -28,6 +29,7 @@ func newTestApp(t *testing.T) *app {
 		st:   st,
 		ps:   ps,
 		pm:   proc.NewManager(nil),
+		geoM: geo.NewManager(t.TempDir(), 8109),
 	}
 }
 

@@ -13,6 +13,7 @@ import (
 	_ "github.com/egoist/mygo/locales/zh-Hant"
 	"github.com/egoist/mygo/ui"
 	"github.com/egoist/mygo/ui/editor"
+	"mygost/internal/geo"
 	"mygost/internal/gostbin"
 	"mygost/internal/proc"
 	"mygost/internal/profiles"
@@ -26,6 +27,7 @@ type app struct {
 	ps   *profiles.Store
 	loc  *gostbin.Locator
 	pm   *proc.Manager
+	geoM *geo.Manager
 	tray *mygo.Tray
 
 	// 页面导航（窄窗口：主界面 + 推入式子页）
@@ -75,6 +77,9 @@ type app struct {
 	sKeep     bool
 	sAuto     bool
 	sLogin    bool
+	sSplit    bool
+	sSplitURL string
+	splitBusy bool // 分流列表更新中
 
 	saveTimer *time.Timer // 文本输入防抖，停顿后才落盘
 }
@@ -108,6 +113,8 @@ func main() {
 		a.sKeep = s.KeepOnExit
 		a.sAuto = s.AutoStart
 		a.sLogin = mygo.App.OpenAtLogin()
+		a.sSplit = s.Split
+		a.sSplitURL = s.SplitIPListURL
 		a.win = mygo.NewWindow(mygo.WindowOptions{
 			Title:     "mygost",
 			Width:     430,
@@ -141,6 +148,7 @@ func main() {
 		if !a.st.Get().KeepOnExit {
 			a.pm.StopAndWait(3 * time.Second)
 		}
+		a.geoM.Stop()
 	})
 	if err := mygo.App.Run(); err != nil {
 		log.Fatal(err)
@@ -170,6 +178,7 @@ func newApp() *app {
 		st:        st,
 		ps:        ps,
 		loc:       &gostbin.Locator{Dir: filepath.Join(dataDir, "bin")},
+		geoM:      geo.NewManager(filepath.Join(dataDir, "geo"), geo.DefaultListenPort),
 	}
 	a.pm = proc.NewManager(a.onProcEvent)
 	return a

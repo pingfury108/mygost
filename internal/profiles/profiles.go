@@ -57,10 +57,58 @@ func NewID() string {
 }
 
 // BuildYAML 由表单字段生成 gost v3 配置；KindCustom 原样返回。
-func (p *Profile) BuildYAML() ([]byte, error) {
-	if p.Kind == KindCustom {
-		return []byte(p.YAML), nil
+// SplitConfig 描述生成 YAML 时要附加的分流配置。
+type SplitConfig struct {
+	// Enabled 是否启用分流。
+	Enabled bool
+	// PluginAddr 是 gost-geo-plugin 的 gRPC 地址。
+	PluginAddr string
+	// PrivateMatchers 是始终直连的私网段。
+	PrivateMatchers []string
+}
+
+// NoSplit 是未启用分流时的默认参数。
+var NoSplit = SplitConfig{}
+
+// BuildYAMLSplit 在 BuildYAML 的基础上附加分流配置。
+//
+// 附加三块：
+//   - hop 引用 split-direct（黑名单命中 = 跳过上游 = 本机直连）
+//   - split-private：私网段始终直连
+//   - split-geo：白名单模式的 geo 插件（解析域名命中国内 IP → 允许直连）
+func (p *Profile) BuildYAMLSplit(sc SplitConfig) ([]byte, error) {
+	y, err := p.BuildYAML()
+	if err != nil || !sc.Enabled || p.Kind != KindProxy {
+		return y, err
 	}
+	s := string(y)
+	// bypass 插在 hop 名字行之后（属于该 hop 的键），而不是名字行之前
+	hopRef := "      - name: hop-0\n"
+	if idx := strings.Index(s, hopRef); idx >= 0 {
+		pos := idx + len(hopRef)
+		s = s[:pos] + "        bypass: split-direct\n" + s[pos:]
+	}
+
+	var b strings.Builder
+	b.WriteString("\nbypasses:\n")
+
+	b.WriteString("  - name: split-private\n    matchers:\n")
+	for _, m := range sc.PrivateMatchers {
+		b.WriteString("      - " + m + "\n")
+	}
+
+	b.WriteString("  - name: split-geo\n    whitelist: true\n    plugin:\n")
+	b.WriteString("      type: grpc\n")
+	b.WriteString("      addr: " + sc.PluginAddr + "\n")
+
+	b.WriteString("  - name: split-direct\n    bypasses:\n")
+	b.WriteString("      - split-private\n      - split-geo\n")
+
+	s += b.String()
+	return []byte(s), nil
+}
+
+func (p *Profile) BuildYAML() ([]byte, error) {
 	if strings.TrimSpace(p.Listen) == "" {
 		return nil, fmt.Errorf("监听地址不能为空")
 	}
@@ -264,10 +312,15 @@ func (s *Store) Get(id string) *Profile {
 
 // Save 写入配置档并生成同名 .yml 供 gost 使用；返回 yml 路径。
 func (s *Store) Save(p *Profile) (string, error) {
+	return s.SaveSplit(p, NoSplit)
+}
+
+// SaveSplit 保存配置档并按分流配置生成 yml，返回 yml 路径。
+func (s *Store) SaveSplit(p *Profile, sc SplitConfig) (string, error) {
 	if strings.TrimSpace(p.Name) == "" {
 		p.Name = "未命名"
 	}
-	yaml, err := p.BuildYAML()
+	yaml, err := p.BuildYAMLSplit(sc)
 	if err != nil {
 		return "", err
 	}

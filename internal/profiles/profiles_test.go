@@ -148,3 +148,52 @@ func TestDialerFor(t *testing.T) {
 		}
 	}
 }
+
+// 分流开启时：hop 挂 split-direct，附加私网直连与 geo 插件两个 bypass。
+func TestBuildYAMLSplitEnabled(t *testing.T) {
+	p := &Profile{
+		Kind: KindProxy, Listen: ":8026", Proto: "http",
+		UpEnabled: true, UpProto: "sshd", UpAddr: "1.2.3.4:8081",
+		UpUser: "gost", UpPass: "xxx",
+	}
+	y, err := p.BuildYAMLSplit(SplitConfig{
+		Enabled:         true,
+		PluginAddr:      "127.0.0.1:8100",
+		PrivateMatchers: []string{"10.0.0.0/8", "192.168.0.0/16"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(y)
+	for _, want := range []string{
+		"bypass: split-direct",
+		"name: split-private",
+		"10.0.0.0/8",
+		"name: split-geo",
+		"whitelist: true",
+		"type: grpc",
+		"addr: 127.0.0.1:8100",
+		"name: split-direct",
+		"bypasses:",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("yaml missing %q:\n%s", want, s)
+		}
+	}
+	// sshd 的 dialer/auth 修正不能被破坏
+	if !strings.Contains(s, "dialer:\n              type: sshd") {
+		t.Errorf("sshd dialer lost:\n%s", s)
+	}
+}
+
+// 分流关闭时不附加任何 bypasses。
+func TestBuildYAMLSplitDisabled(t *testing.T) {
+	p := &Profile{Kind: KindProxy, Listen: ":8026", Proto: "http"}
+	y, err := p.BuildYAMLSplit(SplitConfig{Enabled: false, PluginAddr: "127.0.0.1:8100"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(y), "bypasses:") {
+		t.Errorf("split disabled but bypasses present:\n%s", y)
+	}
+}

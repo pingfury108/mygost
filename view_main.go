@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/egoist/mygo/ui"
+	"mygost/internal/geo"
 	"mygost/internal/gostbin"
 	"mygost/internal/proc"
 	"mygost/internal/profiles"
@@ -238,12 +239,47 @@ func (a *app) doStart() {
 		a.toast("未找到 gost，请先下载", "error")
 		return
 	}
+
+	// 分流开启：先确保 geo 插件在运行（配置生成也会带上 bypasses）
+	if s.Split {
+		if err := a.ensureGeo(); err != nil {
+			a.toast("分流不可用，按无分流启动: "+err.Error(), "error")
+		}
+	}
+
+	// 运行前按当前分流开关重写 yml（保存时的开关可能已变）
+	if p := a.ps.Get(id); p != nil {
+		sc := profiles.SplitConfig{Enabled: s.Split, PluginAddr: a.geoM.Addr(), PrivateMatchers: geo.PrivateMatchers}
+		if _, err := a.ps.SaveSplit(p, sc); err != nil {
+			a.toast("生成配置失败: "+err.Error(), "error")
+			return
+		}
+	}
 	yml := a.ps.YamlPath(id)
 	if err := a.pm.Start(bin, yml); err != nil {
 		a.toast("启动失败: "+err.Error(), "error")
 		return
 	}
-	a.toast("已连接", "success")
+	a.toast(tr("已连接", "Connected"), "success")
+}
+
+// ensureGeo 确保分流插件运行且规则就绪；规则缺失时自动下载。
+func (a *app) ensureGeo() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	if !a.geoM.ListReady() {
+		if _, err := a.geoM.UpdateIPList(ctx, a.st.Get().SplitIPListURL); err != nil {
+			return fmt.Errorf("更新 IP 列表失败: %w", err)
+		}
+	}
+	if a.geoM.Running() {
+		return nil // 已在运行；规则文件热加载由 gost reload 处理
+	}
+	if err := a.geoM.Start(ctx); err != nil {
+		return err
+	}
+	return a.geoM.WaitReady(ctx, 10*time.Second)
 }
 
 // doDownload 后台下载 gost。

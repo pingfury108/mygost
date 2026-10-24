@@ -20,6 +20,10 @@ type Settings struct {
 	AutoStart bool `json:"autoStart"`
 	// Current 是当前选中的配置档 ID。
 	Current string `json:"current"`
+	// Split 开启分流（国内直连，国外走隧道）。
+	Split bool `json:"split"`
+	// SplitIPListURL 是国内 IP 列表下载地址，空用内置默认。
+	SplitIPListURL string `json:"splitIPListURL,omitempty"`
 }
 
 // Store 并发安全地读写 settings.json。
