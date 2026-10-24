@@ -1,6 +1,8 @@
 package main
 
 import (
+	"strings"
+
 	"github.com/egoist/mygo/ui"
 	"github.com/egoist/mygo/ui/editor"
 	"gopkg.in/yaml.v3"
@@ -13,25 +15,36 @@ var kindValues = []profiles.Kind{profiles.KindProxy, profiles.KindForward, profi
 
 // viewProfileForm 新建/编辑表单（子页面，窄窗口单列）。
 func (a *app) viewProfileForm(c *ui.Context) {
-	ui.Column(c).Fill().Padding(16).Gap(14).Children(func() {
-		if ui.Segmented(c, &a.formKind, kindNames...).Changed() {
+	t := c.Theme()
+	ui.Column(c).FillWidth().Padding(sp4).Gap(sp3).Children(func() {
+		if ui.Segmented(c, &a.formKind, kindNames...).Label("类型").Changed() {
 			a.syncFormKind()
+			a.formErr = ""
 		}
 
 		switch kindValues[a.formKind] {
 		case profiles.KindProxy:
 			a.proxyForm(c)
-			a.viewUpstream(c)
 		case profiles.KindForward:
 			a.forwardForm(c)
 		case profiles.KindCustom:
 			a.customForm(c)
 		}
 
-		// 底部操作
-		ui.Row(c).Gap(10).Padding(4, 0).Children(func() {
-			ui.Button(c, "取消").Grow(1).OnClick(a.goMain)
-			ui.PrimaryButton(c, "保存").Grow(1).OnClick(a.saveEdit)
+		// 内联错误：字段级别提示，不只靠 toast
+		if a.formErr != "" {
+			ui.Text(c, a.formErr).FontSize(fsCaption).TextColor(t.Danger)
+		}
+
+		ui.Box(c).Grow(1)
+
+		// 底部操作：保存为主（2/3），取消为次（1/3）
+		ui.Row(c).FillWidth().Gap(sp2).Children(func() {
+			ui.Button(c, "取消").Grow(1).OnClick(func() {
+				a.formErr = ""
+				a.goMain()
+			})
+			ui.PrimaryButton(c, "保存").Grow(2).OnClick(a.saveEdit)
 		})
 	})
 }
@@ -45,9 +58,9 @@ func formName(c *ui.Context, a *app) {
 
 func (a *app) proxyForm(c *ui.Context) {
 	card(c).Children(func() {
-		ui.Column(c).Fill().Gap(12).Children(func() {
+		ui.Column(c).FillWidth().Gap(sp3).Children(func() {
 			formName(c, a)
-			ui.Row(c).Gap(12).Children(func() {
+			ui.Row(c).FillWidth().Gap(sp3).Children(func() {
 				ui.Field(c, "监听地址", func() {
 					ui.TextInput(c, &a.form.Listen).Grow(1).Placeholder(":8080")
 				})
@@ -55,12 +68,40 @@ func (a *app) proxyForm(c *ui.Context) {
 					ui.Select(c, &a.form.Proto, []string{"http", "socks5", "relay"}).Width(120)
 				})
 			})
-			ui.Row(c).Gap(12).Children(func() {
+			ui.Row(c).FillWidth().Gap(sp3).Children(func() {
 				ui.Field(c, "用户名（可选）", func() {
 					ui.TextInput(c, &a.form.User).Grow(1)
 				})
 				ui.Field(c, "密码（可选）", func() {
 					ui.TextInput(c, &a.form.Password).Grow(1).Password()
+				})
+			})
+
+			// 高级：上游转发链（低频功能，默认折叠）
+			ui.Divider(c)
+			ui.Collapsible(c, "上游转发链（经由另一台代理）", &a.formUpOpen, func() {
+				ui.Column(c).FillWidth().Gap(12).Padding(4, 0).Children(func() {
+					settingRow(c, "启用上游", "流量将经由该上游转发", func() {
+						ui.Switch(c, &a.form.UpEnabled)
+					})
+					if a.form.UpEnabled {
+						ui.Row(c).Gap(12).Children(func() {
+							ui.Field(c, "协议", func() {
+								ui.Select(c, &a.form.UpProto, []string{"socks5", "http"}).Width(120)
+							})
+							ui.Field(c, "地址", func() {
+								ui.TextInput(c, &a.form.UpAddr).Grow(1).Placeholder("1.2.3.4:1080")
+							})
+						})
+						ui.Row(c).Gap(12).Children(func() {
+							ui.Field(c, "用户名（可选）", func() {
+								ui.TextInput(c, &a.form.UpUser).Grow(1)
+							})
+							ui.Field(c, "密码（可选）", func() {
+								ui.TextInput(c, &a.form.UpPass).Grow(1).Password()
+							})
+						})
+					}
 				})
 			})
 		})
@@ -69,9 +110,9 @@ func (a *app) proxyForm(c *ui.Context) {
 
 func (a *app) forwardForm(c *ui.Context) {
 	card(c).Children(func() {
-		ui.Column(c).Fill().Gap(12).Children(func() {
+		ui.Column(c).FillWidth().Gap(sp3).Children(func() {
 			formName(c, a)
-			ui.Row(c).Gap(12).Children(func() {
+			ui.Row(c).FillWidth().Gap(sp3).Children(func() {
 				ui.Field(c, "监听地址", func() {
 					ui.TextInput(c, &a.form.Listen).Grow(1).Placeholder(":2222")
 				})
@@ -88,42 +129,11 @@ func (a *app) forwardForm(c *ui.Context) {
 
 func (a *app) customForm(c *ui.Context) {
 	t := c.Theme()
-	ui.Text(c, "直接编辑 gost.yml（完整能力）。").TextColor(t.TextMuted)
-	ui.Box(c).Fill().Height(360).Radius(10).Background(t.Surface).Children(func() {
+	ui.Text(c, "直接编辑 gost.yml，支持 gost 全部能力。").FontSize(fsCaption).TextColor(t.TextMuted)
+	ui.Box(c).FillWidth().Grow(1).HeightPercent(60).Radius(rCard).Background(t.Surface).Children(func() {
 		if a.customBuf != nil {
 			editor.View(c, a.customBuf).Fill()
 		}
-	})
-}
-
-// viewUpstream 代理档的可选上游转发链。
-func (a *app) viewUpstream(c *ui.Context) {
-	ui.Collapsible(c, "上游转发链（经由另一台代理）", &a.formUpOpen, func() {
-		card(c).Children(func() {
-			ui.Column(c).Fill().Gap(12).Children(func() {
-				settingRow(c, "启用上游", "流量将经由该上游转发", func() {
-					ui.Switch(c, &a.form.UpEnabled)
-				})
-				if a.form.UpEnabled {
-					ui.Row(c).Gap(12).Children(func() {
-						ui.Field(c, "协议", func() {
-							ui.Select(c, &a.form.UpProto, []string{"socks5", "http"}).Width(120)
-						})
-						ui.Field(c, "地址", func() {
-							ui.TextInput(c, &a.form.UpAddr).Grow(1).Placeholder("1.2.3.4:1080")
-						})
-					})
-					ui.Row(c).Gap(12).Children(func() {
-						ui.Field(c, "用户名（可选）", func() {
-							ui.TextInput(c, &a.form.UpUser).Grow(1)
-						})
-						ui.Field(c, "密码（可选）", func() {
-							ui.TextInput(c, &a.form.UpPass).Grow(1).Password()
-						})
-					})
-				}
-			})
-		})
 	})
 }
 
@@ -182,14 +192,19 @@ func (a *app) saveEdit() {
 	if a.form.Kind == profiles.KindCustom && a.customBuf != nil {
 		a.form.YAML = a.customBuf.Buffer.String()
 		if !yamlValid(a.form.YAML) {
-			a.toast("YAML 语法有误，请检查", "error")
+			a.formErr = "YAML 语法有误，请检查缩进与冒号"
 			return
 		}
 	}
-	if _, err := a.ps.Save(&a.form); err != nil {
-		a.toast("保存失败: "+err.Error(), "error")
+	if strings.TrimSpace(a.form.Name) == "" {
+		a.formErr = "请填写名称"
 		return
 	}
+	if _, err := a.ps.Save(&a.form); err != nil {
+		a.formErr = err.Error()
+		return
+	}
+	a.formErr = ""
 	a.update(func(s *settings.Settings) {
 		if s.Current == "" {
 			s.Current = a.form.ID

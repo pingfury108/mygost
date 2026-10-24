@@ -12,65 +12,83 @@ import (
 	"mygost/internal/settings"
 )
 
-// viewMain 主界面：大连接按钮（中心点）+ 配置列表 + 底部工具栏。
+// viewMain 主界面：按状态机分流——空应用只渲染引导，有配置渲染完整形态。
 func (a *app) viewMain(c *ui.Context) {
+	if len(a.ps.Items()) == 0 {
+		a.viewEmpty(c)
+		return
+	}
+	a.viewDashboard(c)
+}
+
+// viewEmpty 空状态：整页引导，单一中心点。
+func (a *app) viewEmpty(c *ui.Context) {
 	t := c.Theme()
-	state, started, _ := a.pm.State()
+	ui.Column(c).Fill().Center().Gap(sp3).Children(func() {
+		statusDot(c, t.SurfaceHover, 56)
+		ui.Text(c, "还没有配置").FontSize(fsDisplay).Bold()
+		ui.Text(c, "添加本地代理或端口转发，一键连接").FontSize(fsBody).TextColor(t.TextMuted)
+		ui.PrimaryButton(c, "添加配置").OnClick(a.startNew)
+	})
+}
+
+// viewDashboard 有配置后的完整形态：连接按钮 + gost 横条 + 配置列表。
+func (a *app) viewDashboard(c *ui.Context) {
+	t := c.Theme()
+	state, _, _ := a.pm.State()
 	running := state == proc.Running
 	runningID := a.runningProfileID()
 	current := a.st.Get().Current
 
 	ui.Column(c).Fill().Children(func() {
-		// ── 中心点：连接状态与大圆按钮 ──
-		ui.Column(c).Fill().Center().Gap(10).Padding(20, 0, 8).Children(func() {
-			btnColor := t.Surface
-			btnText := "连接"
-			btnTextColor := t.TextMuted
+		// ── 上 3：状态区（大圆按钮 = 连接当前选中档）──
+		ui.Column(c).FillWidth().HeightPercent(30).AlignItems(ui.Center).Justify(ui.Center).Children(func() {
+			// 颜色 = 状态：灰(未就绪) / 蓝(可连接，主操作) / 绿(已连接)
+			// 文字 = 动作：连接 / 断开。已连接时外加光环，让绿色只声明状态。
+			btnColor, btnText, btnTextColor := t.Surface, "连接", t.TextMuted
 			switch {
 			case running:
-				btnColor, btnText, btnTextColor = t.Danger, "断开", t.AccentText
+				btnColor, btnText, btnTextColor = t.Success, "断开", t.AccentText
 			case current != "" && a.binFound:
-				btnColor, btnTextColor = t.Success, t.AccentText
+				btnColor, btnTextColor = t.Accent, t.AccentText
 			}
-			// 大圆连接按钮（无外观按钮 + 自绘样式，支持键盘与无障碍）
-			big := ui.ButtonBase(c).Width(76).Height(76).Radius(38).Background(btnColor).
-				Cursor(ui.CursorPointer).Children(func() {
-				ui.Column(c).Fill().Center().Children(func() {
-					ui.Text(c, btnText).Bold().TextColor(btnTextColor)
+			const d float32 = 88
+			ring := func() {
+				if !running {
+					return
+				}
+				ui.Box(c).Width(d + sp3*2).Height(d + sp3*2).Radius((d + sp3*2) / 2).
+					Background(successHalo(t))
+			}
+			// 光环与按钮同心：叠加在按钮下层会偏移，用 Box 叠放
+			ui.Box(c).Children(func() {
+				ring()
+				big := ui.ButtonBase(c).Width(d).Height(d).Radius(d / 2).Background(btnColor).
+					Cursor(ui.CursorPointer).Children(func() {
+					ui.Column(c).Fill().Center().Children(func() {
+						ui.Text(c, btnText).FontSize(fsEmphasis).Bold().TextColor(btnTextColor)
+					})
 				})
-			})
-			if big.Clicked() {
-				go a.toggleMain(runningID)
-			}
-			// 状态行
-			ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
-				dot := t.TextMuted
-				if running {
-					dot = t.Success
-				} else if state == proc.Crashed {
-					dot = t.Danger
+				if big.Clicked() {
+					go a.toggleMain(runningID)
 				}
-				statusDot(c, dot, 8)
-				label := state.String()
-				if running {
-					label = fmt.Sprintf("%s · %s", state.String(), fmtDuration(time.Since(started)))
-				}
-				ui.Text(c, label).FontSize(15)
 			})
-			if p := a.currentProfile(); p != nil {
-				ui.Text(c, p.Name).FontSize(13).TextColor(t.TextMuted)
-			}
 		})
 
 		// ── gost 未安装横条 ──
 		if !a.binFound {
-			ui.Box(c).Padding(0, 16).Children(func() {
-				ui.Box(c).Fill().Padding(10, 14).Radius(10).Border(1, t.Warning).Children(func() {
-					ui.Row(c).Gap(10).AlignItems(ui.Center).Children(func() {
-						ui.Text(c, "gost 未安装").Grow(1)
+			ui.Box(c).Padding(0, sp4).Children(func() {
+				ui.Box(c).FillWidth().Padding(sp3, sp4).Radius(rRow).
+					Background(warningSoft(t)).Children(func() {
+					ui.Row(c).Gap(sp3).AlignItems(ui.Center).Children(func() {
+						ui.Column(c).Grow(1).Gap(1).Children(func() {
+							ui.Text(c, "gost 未安装").FontSize(fsBody)
+							ui.Text(c, "下载后才能连接").FontSize(fsCaption).TextColor(t.TextMuted)
+						})
 						if a.dlBusy {
 							if a.dlTotal > 0 {
-								ui.Textf(c, "下载中 %.0f%%", 100*float64(a.dlDone)/float64(a.dlTotal)).TextColor(t.TextMuted)
+								ui.Textf(c, "%.0f%%", 100*float64(a.dlDone)/float64(a.dlTotal)).
+									FontSize(fsCaption).TextColor(t.TextMuted)
 							} else {
 								ui.Spinner(c)
 							}
@@ -82,35 +100,23 @@ func (a *app) viewMain(c *ui.Context) {
 			})
 		}
 
-		// ── 配置列表标题 ──
-		ui.Row(c).AlignItems(ui.Center).Padding(14, 16, 6).Children(func() {
-			ui.Text(c, "配置").FontSize(13).Bold().TextColor(t.TextMuted).Grow(1)
-			ui.Button(c, "+ 添加").OnClick(a.startNew)
-		})
-
-		// ── 配置列表 ──
-		ui.Box(c).Fill().Grow(1).Padding(0, 16).Children(func() {
+		// ── 下 7：配置列表 ──
+		ui.Box(c).Fill().Grow(1).Padding(sp3, sp4, sp4).Children(func() {
 			ui.Scroll(c).Fill().Children(func() {
-				ui.Column(c).Fill().Gap(8).Children(func() {
-					items := a.ps.Items()
-					if len(items) == 0 {
-						ui.Column(c).Fill().Center().Gap(8).Padding(28).Children(func() {
-							ui.Text(c, "还没有配置").Bold()
-							ui.Text(c, "添加一个本地代理或端口转发。").TextColor(t.TextMuted)
-						})
-						return
-					}
-					for _, p := range items {
+				ui.Column(c).FillWidth().Gap(sp2).Children(func() {
+					for _, p := range a.ps.Items() {
 						a.profileRow(c, p, p.ID == current, p.ID == runningID)
+					}
+					// 列表末尾：轻量添加入口（次级操作，不与配置卡片抢视觉）
+					add := ui.ButtonBase(c).FillWidth().Height(36).Radius(rRow).
+						Cursor(ui.CursorPointer).Children(func() {
+						ui.Text(c, "＋ 添加配置").FontSize(fsBody).TextColor(t.TextMuted)
+					})
+					if add.Clicked() {
+						a.startNew()
 					}
 				})
 			})
-		})
-
-		// ── 底部工具栏 ──
-		ui.Row(c).Fill().Padding(6, 16).Gap(8).Children(func() {
-			ui.Button(c, "日志").Grow(1).OnClick(func() { a.page = "logs" })
-			ui.Button(c, "设置").Grow(1).OnClick(func() { a.page = "settings" })
 		})
 	})
 
@@ -131,49 +137,40 @@ func (a *app) viewMain(c *ui.Context) {
 		}
 	}
 
-	// 运行中每秒刷新时长
-	if running {
-		c.After(time.Second)
-	}
 }
 
-// profileRow 渲染一行配置：状态点 + 名称摘要 + 连接控件 + 菜单。
+// profileRow 渲染一行配置：点行 = 选用；编辑/删除在 ⋯ 菜单或右键。
 func (a *app) profileRow(c *ui.Context, p *profiles.Profile, isCurrent, isRunning bool) {
 	t := c.Theme()
-	ui.Box(c).Fill().Padding(12, 14).Radius(10).Background(t.Surface).Children(func() {
-		ui.Row(c).Gap(12).AlignItems(ui.Center).Children(func() {
-			// 状态点：运行绿 / 当前蓝 / 其他灰
-			dot := t.Border
-			if isRunning {
-				dot = t.Success
-			} else if isCurrent {
-				dot = t.Accent
+	// 选中用淡底 + 左侧色条表达，不再用描边（描边只留给键盘焦点）
+	bg := t.Surface
+	if isCurrent {
+		bg = accentSoft(t)
+	}
+	row := ui.ButtonBase(c).FillWidth().Padding(sp3, sp3).Radius(rRow).
+		Background(bg).Cursor(ui.CursorPointer).
+		Tooltip("点击选用；编辑在 ⋯ 菜单").Children(func() {
+		ui.Row(c).FillWidth().Gap(sp3).AlignItems(ui.Start).Children(func() {
+			// 左侧：选中标记 / 运行状态点（单一编码）
+			if isCurrent {
+				ui.Box(c).Width(3).Height(34).Radius(1.5).Background(t.Accent)
 			}
-			statusDot(c, dot, 8)
-
 			// 名称与摘要
 			ui.Column(c).Grow(1).Gap(2).Children(func() {
-				ui.Row(c).Gap(6).AlignItems(ui.Center).Children(func() {
-					ui.Text(c, p.Name).FontSize(15)
-					ui.Badge(c, profiles.KindLabel(p.Kind))
+				ui.Row(c).Gap(sp2).AlignItems(ui.Center).Children(func() {
+					ui.Text(c, p.Name).FontSize(fsEmphasis)
+					if isRunning {
+						statusDot(c, t.Success, dotSm)
+					}
+					ui.Text(c, profiles.KindLabel(p.Kind)).FontSize(fsCaption).TextColor(t.TextMuted)
 				})
-				ui.Text(c, p.Summary()).FontSize(12).TextColor(t.TextMuted)
+				ui.Text(c, p.Summary()).FontSize(fsBody).TextColor(t.TextMuted).
+					Ellipsis("end")
 			})
 
-			// 连接控件：互斥，一次只启动一个
-			if isRunning {
-				ui.Text(c, "已连接").FontSize(13).Bold().TextColor(t.Success)
-				ui.Button(c, "断开").OnClick(func() { go a.pm.Stop() })
-			} else {
-				btn := ui.Button(c, "连接")
-				if !a.binFound {
-					btn = btn.Disabled(true)
-				}
-				btn.OnClick(func() { go a.connectProfile(p.ID) })
-			}
-
-			// 行菜单：编辑 / 删除（点击 ⋯ 或右键均可）
-			ui.Text(c, "⋯").TextColor(t.TextMuted).Menu(func(m *ui.Menu) {
+			// 右侧：菜单
+			menu := iconButton(c, "⋯")
+			menu.Menu(func(m *ui.Menu) {
 				if m.Item("编辑").Chosen() {
 					a.startEdit(p)
 				}
@@ -184,7 +181,12 @@ func (a *app) profileRow(c *ui.Context, p *profiles.Profile, isCurrent, isRunnin
 				}
 			})
 		})
-	}).ContextMenu(func(m *ui.Menu) {
+	})
+	if row.Clicked() && !isCurrent {
+		id := p.ID
+		a.update(func(s *settings.Settings) { s.Current = id })
+	}
+	row.ContextMenu(func(m *ui.Menu) {
 		if m.Item("编辑").Chosen() {
 			a.startEdit(p)
 		}
@@ -204,15 +206,6 @@ func (a *app) toggleMain(runningID string) {
 		}
 		return
 	}
-	a.doStart()
-}
-
-// connectProfile 连接指定档；若有档在运行，先停止旧的（互斥）。
-func (a *app) connectProfile(id string) {
-	if runningID := a.runningProfileID(); runningID != "" {
-		a.pm.StopAndWait(5 * time.Second)
-	}
-	a.update(func(s *settings.Settings) { s.Current = id })
 	a.doStart()
 }
 
@@ -283,9 +276,10 @@ func (a *app) checkBinAsync() {
 
 func fmtDuration(d time.Duration) string {
 	d = d.Round(time.Second)
-	h := int(d) / 3600
-	m := int(d) % 3600 / 60
-	s := int(d) % 60
+	total := int(d.Seconds()) // 注意：int(d) 是纳秒，必须用 Seconds()
+	h := total / 3600
+	m := total % 3600 / 60
+	s := total % 60
 	if h > 0 {
 		return fmt.Sprintf("%d:%02d:%02d", h, m, s)
 	}

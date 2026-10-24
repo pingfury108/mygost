@@ -39,12 +39,22 @@ type app struct {
 	// 配置档编辑
 	editing    bool
 	form       profiles.Profile
-	formKind   int  // Segmented 索引
-	formUpOpen bool // 上游转发链折叠区
+	formKind   int    // Segmented 索引
+	formUpOpen bool   // 上游转发链折叠区
+	formErr    string // 表单内联错误
 	customBuf  *editor.State
 
 	// 日志页
 	logFilter string
+	logFollow bool // 自动跟随最新日志（可关闭）
+	logSeen   int  // 上一帧的行数，用于只在新增时滚动
+
+	// 主题安装状态（跟随系统深浅色）
+	themeApplied bool
+	themeDark    bool
+
+	// 设置页保存反馈（短时提示）
+	savedUntil time.Time
 
 	// 待展示的 toast（视图构建时 flush 到窗口）
 	pendingToasts []ui.Toast
@@ -60,6 +70,8 @@ type app struct {
 	sKeep     bool
 	sAuto     bool
 	sLogin    bool
+
+	saveTimer *time.Timer // 文本输入防抖，停顿后才落盘
 }
 
 var dataDir string
@@ -88,6 +100,7 @@ func main() {
 		})
 		a.setupTray()
 		a.refreshTray()
+		a.setupAppMenu()
 		a.checkBinAsync()
 		if s.AutoStart && s.Current != "" {
 			go a.doStart()
@@ -121,10 +134,11 @@ func newApp() *app {
 		log.Printf("读取配置档失败: %v", err)
 	}
 	a := &app{
-		page: "main",
-		st:   st,
-		ps:   ps,
-		loc:  &gostbin.Locator{Dir: filepath.Join(dataDir, "bin")},
+		page:      "main",
+		logFollow: true,
+		st:        st,
+		ps:        ps,
+		loc:       &gostbin.Locator{Dir: filepath.Join(dataDir, "bin")},
 	}
 	a.pm = proc.NewManager(a.onProcEvent)
 	return a
