@@ -52,7 +52,9 @@ view_main.go          主界面：连接大按钮、配置列表、互斥启停
 view_profiles.go      新建/编辑表单（代理 / 端口转发 / YAML）
 view_logs.go          日志
 view_settings.go      设置
-tray.go               托盘图标与菜单
+tray.go               托盘图标与菜单（与 app 图标同一标记）
+theme.go              设计 token（间距/圆角/字号）、主题派生、语义柔色
+tools/icongen/        图标生成器：go run tools/icongen/main.go
 internal/settings/    设置持久化（JSON）
 internal/profiles/    配置档存储 + gost.yml 生成
 internal/gostbin/     二进制定位、下载、（可选）嵌入

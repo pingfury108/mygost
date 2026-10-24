@@ -4,14 +4,14 @@ import (
 	"bytes"
 	"image"
 	"image/color"
-	"image/draw"
 	"image/png"
+	"math"
 
 	"github.com/egoist/mygo"
 	"mygost/internal/proc"
 )
 
-// setupTray 创建托盘图标（运行中实心圆点，停止时空心圆点）。
+// setupTray 创建托盘图标（与 app 图标同一标记：隧道拱洞）。
 func (a *app) setupTray() {
 	tray, err := mygo.NewTray(mygo.TrayOptions{
 		ID:             "main",
@@ -33,11 +33,12 @@ func (a *app) refreshTray() {
 	}
 	state, _, _ := a.pm.State()
 	running := state == proc.Running
+	// 运行中实心拱洞，停止时空心
 	a.tray.SetIcon(trayPNG(running), true)
 
-	startLabel := "启动"
+	action := "连接"
 	if running {
-		startLabel = "停止"
+		action = "断开"
 	}
 	items := []*mygo.MenuItem{
 		{Label: "打开 mygost", Click: func(*mygo.MenuItem, *mygo.Window) {
@@ -46,7 +47,8 @@ func (a *app) refreshTray() {
 				a.win.Focus()
 			}
 		}},
-		{Label: startLabel, Click: func(*mygo.MenuItem, *mygo.Window) {
+		mygo.Separator(),
+		{Label: action, Click: func(*mygo.MenuItem, *mygo.Window) {
 			if running {
 				go a.pm.Stop()
 			} else {
@@ -59,22 +61,62 @@ func (a *app) refreshTray() {
 	a.tray.SetMenu(mygo.NewMenu(items))
 }
 
-// trayPNG 绘制 32x32 托盘图标：黑色圆点（模板图标，系统自动着色）。
+// trayPNG 绘制 32×32 单色托盘图标：隧道拱洞，运行中实心并带光点。
 func trayPNG(running bool) []byte {
-	const size = 32
-	img := image.NewRGBA(image.Rect(0, 0, size, size))
-	draw.Draw(img, img.Bounds(), image.Transparent, image.Point{}, draw.Src)
+	const (
+		out = 32
+		ss  = 4
+		n   = out * ss
+	)
+	// 几何（按 32 点坐标系定义）
+	const (
+		cx     = 16.0
+		top    = 4.0
+		bottom = 27.0
+		halfW  = 9.5
+		wall   = 3.6
+	)
+	// 拱洞：上为半圆，下为直边
+	inArch := func(x, y, w float64) bool {
+		if y < top || y > bottom {
+			return false
+		}
+		if y >= top+w {
+			return math.Abs(x-cx) <= w
+		}
+		dy := y - (top + w)
+		return (x-cx)*(x-cx)+dy*dy <= w*w
+	}
+	// 中心光点
+	inDot := func(x, y float64) bool {
+		dx, dy := x-cx, y-19.5
+		return dx*dx+dy*dy <= 2.6*2.6
+	}
+
+	img := image.NewRGBA(image.Rect(0, 0, out, out))
 	black := color.RGBA{0, 0, 0, 255}
-	cx, cy := float64(size)/2, float64(size)/2
-	for y := 0; y < size; y++ {
-		for x := 0; x < size; x++ {
-			d := (float64(x)-cx+0.5)*(float64(x)-cx+0.5) + (float64(y)-cy+0.5)*(float64(y)-cy+0.5)
-			switch {
-			case running && d <= 100: // r=10 实心
-				img.Set(x, y, black)
-			case !running && d <= 100 && d >= 56: // 空心环
-				img.Set(x, y, black)
+	for py := 0; py < out; py++ {
+		for px := 0; px < out; px++ {
+			covered := 0
+			for sy := 0; sy < ss; sy++ {
+				for sx := 0; sx < ss; sx++ {
+					x := (float64(px*ss+sx) + 0.5) / ss
+					y := (float64(py*ss+sy) + 0.5) / ss
+					hit := inArch(x, y, halfW) && !inArch(x, y, halfW-wall) // 拱壁
+					if running {
+						hit = inArch(x, y, halfW) || inDot(x, y) // 实心 + 光点
+					}
+					if hit {
+						covered++
+					}
+				}
 			}
+			if covered == 0 {
+				continue
+			}
+			c := black
+			c.A = uint8(255 * covered / (ss * ss))
+			img.SetRGBA(px, py, c)
 		}
 	}
 	var buf bytes.Buffer
