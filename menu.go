@@ -5,17 +5,18 @@ import (
 )
 
 // setupAppMenu 设置应用菜单：macOS 菜单栏；Windows/Linux 为窗口菜单栏。
-// 「日志」入口带全局快捷键。
+// 文案跟随系统语言，快捷键固定。
 func (a *app) setupAppMenu() {
+	detectLang()
 	mygo.App.SetMenu(mygo.NewMenu([]*mygo.MenuItem{
-		// macOS 应用菜单（Cmd+Q 等）；其他平台自动省略
+		// macOS 应用菜单（Quit 等）；其他平台自动省略
 		{Role: mygo.RoleAppMenu},
 		{Role: mygo.RoleEditMenu},
-		{Label: "视图", Submenu: []*mygo.MenuItem{
-			{Label: "日志", Accelerator: "CmdOrCtrl+L", Click: func(*mygo.MenuItem, *mygo.Window) {
+		{Label: tr("视图", "View"), Submenu: []*mygo.MenuItem{
+			{Label: tr("日志", "Logs"), Accelerator: "CmdOrCtrl+L", Click: func(*mygo.MenuItem, *mygo.Window) {
 				a.showLogs()
 			}},
-			{Label: "设置…", Accelerator: "CmdOrCtrl+,", Click: func(*mygo.MenuItem, *mygo.Window) {
+			{Label: tr("设置…", "Settings…"), Accelerator: "CmdOrCtrl+,", Click: func(*mygo.MenuItem, *mygo.Window) {
 				a.showSettings()
 			}},
 		}},

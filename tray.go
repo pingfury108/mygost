@@ -72,7 +72,7 @@ func (a *app) trayTarget() (name, port string) {
 func trayTooltip(running bool, state proc.State, name, port string, started time.Time) string {
 	switch {
 	case running:
-		parts := "运行中"
+		parts := tr("运行中", "Connected")
 		if name != "" {
 			parts += " · " + name
 		}
@@ -84,19 +84,19 @@ func trayTooltip(running bool, state proc.State, name, port string, started time
 		}
 		return "mygost " + parts
 	case state == proc.Crashed:
-		return "mygost 异常退出"
+		return "mygost " + tr("异常退出", "crashed")
 	default:
-		return "mygost 未连接"
+		return "mygost " + tr("未连接", "disconnected")
 	}
 }
 
 // trayMenuItems 构建托盘菜单。
 func (a *app) trayMenuItems(running bool, state proc.State, name, port string, started time.Time) []*mygo.MenuItem {
 	// 状态行：只读
-	status := "未连接"
+	status := tr("未连接", "Disconnected")
 	switch {
 	case running:
-		status = "运行中 " + fmtDuration(time.Since(started))
+		status = tr("运行中 ", "Connected ") + fmtDuration(time.Since(started))
 		if name != "" {
 			status += " · " + name
 		}
@@ -104,12 +104,12 @@ func (a *app) trayMenuItems(running bool, state proc.State, name, port string, s
 			status += " " + port
 		}
 	case state == proc.Crashed:
-		status = "异常退出"
+		status = tr("异常退出", "Crashed")
 	}
 
-	action := "连接"
+	action := tr("连接", "Connect")
 	if running {
-		action = "断开"
+		action = tr("断开", "Disconnect")
 	}
 
 	return []*mygo.MenuItem{
@@ -123,16 +123,16 @@ func (a *app) trayMenuItems(running bool, state proc.State, name, port string, s
 			}
 		}},
 		mygo.Separator(),
-		{Label: "配置", Submenu: a.trayProfileItems()},
+		{Label: tr("配置", "Profiles"), Submenu: a.trayProfileItems()},
 		mygo.Separator(),
-		{Label: "日志…", Accelerator: "CmdOrCtrl+L", Click: func(*mygo.MenuItem, *mygo.Window) {
+		{Label: tr("日志…", "Logs…"), Accelerator: "CmdOrCtrl+L", Click: func(*mygo.MenuItem, *mygo.Window) {
 			a.showLogs()
 		}},
-		{Label: "设置…", Accelerator: "CmdOrCtrl+,", Click: func(*mygo.MenuItem, *mygo.Window) {
+		{Label: tr("设置…", "Settings…"), Accelerator: "CmdOrCtrl+,", Click: func(*mygo.MenuItem, *mygo.Window) {
 			a.showSettings()
 		}},
 		mygo.Separator(),
-		{Label: "打开 mygost", Click: func(*mygo.MenuItem, *mygo.Window) {
+		{Label: tr("打开 mygost", "Open mygost"), Click: func(*mygo.MenuItem, *mygo.Window) {
 			a.showMain()
 		}},
 		{Role: mygo.RoleQuit},
@@ -143,7 +143,7 @@ func (a *app) trayMenuItems(running bool, state proc.State, name, port string, s
 func (a *app) trayProfileItems() []*mygo.MenuItem {
 	items := a.ps.Items()
 	if len(items) == 0 {
-		return []*mygo.MenuItem{{Label: "还没有配置", Disabled: true}}
+		return []*mygo.MenuItem{{Label: tr("还没有配置", "No profiles yet"), Disabled: true}}
 	}
 	current := a.st.Get().Current
 	if rid := a.runningProfileID(); rid != "" {
@@ -162,7 +162,7 @@ func (a *app) trayProfileItems() []*mygo.MenuItem {
 		})
 	}
 	out = append(out, mygo.Separator())
-	out = append(out, &mygo.MenuItem{Label: "在窗口中编辑…", Click: func(*mygo.MenuItem, *mygo.Window) {
+	out = append(out, &mygo.MenuItem{Label: tr("在窗口中编辑…", "Edit in Window…"), Click: func(*mygo.MenuItem, *mygo.Window) {
 		a.showMain()
 	}})
 	return out
@@ -177,7 +177,7 @@ func (a *app) trayConnect(id string) {
 	}
 	bin, _, err := a.loc.Find(a.st.Get().GostPath)
 	if err != nil {
-		a.toast("未找到 gost，请先下载", "error")
+		a.toast(tr("未找到 gost，请先下载", "gost not found, download it first"), "error")
 		return
 	}
 
@@ -193,7 +193,7 @@ func (a *app) trayConnect(id string) {
 	a.update(func(s *settings.Settings) { s.Current = id })
 	startErr := a.pm.Start(bin, a.ps.YamlPath(id))
 	if startErr == nil {
-		a.toast("已连接 "+target.Name, "success")
+		a.toast(tr("已连接 ", "Connected to ")+target.Name, "success")
 		return
 	}
 
@@ -202,7 +202,7 @@ func (a *app) trayConnect(id string) {
 	if oldID != "" {
 		a.pm.Start(bin, a.ps.YamlPath(oldID))
 	}
-	a.toast("切换到 "+target.Name+" 失败："+startErr.Error(), "error")
+	a.toast(tr("切换到 ", "Failed to switch to ")+target.Name+tr(" 失败：", ": ")+startErr.Error(), "error")
 }
 
 // trayPNG 绘制 32×32 单色托盘图标：隧道拱洞，运行中实心并带光点。

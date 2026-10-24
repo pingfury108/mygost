@@ -271,3 +271,37 @@ func TestTrayMenuShape(t *testing.T) {
 		t.Errorf("config submenu: %+v", sub)
 	}
 }
+
+// 菜单/托盘文案跟随系统语言：中文环境用中文，其余用英文。
+func TestMenuLanguage(t *testing.T) {
+	defer func() { langZh = true }()
+
+	langZh = true
+	if got := tr("视图", "View"); got != "视图" {
+		t.Errorf("zh: got %q", got)
+	}
+	a := newTestApp(t)
+	zh := a.trayMenuItems(false, proc.Stopped, "", "", time.Time{})
+	if zh[0].Label != "未连接" || zh[2].Label != "连接" {
+		t.Errorf("zh tray menu: %q / %q", zh[0].Label, zh[2].Label)
+	}
+
+	langZh = false
+	if got := tr("视图", "View"); got != "View" {
+		t.Errorf("en: got %q", got)
+	}
+	en := a.trayMenuItems(false, proc.Stopped, "", "", time.Time{})
+	if en[0].Label != "Disconnected" || en[2].Label != "Connect" {
+		t.Errorf("en tray menu: %q / %q", en[0].Label, en[2].Label)
+	}
+	labels := []string{en[4].Label, en[6].Label, en[7].Label, en[9].Label}
+	want := []string{"Profiles", "Logs…", "Settings…", "Open mygost"}
+	for i := range want {
+		if labels[i] != want[i] {
+			t.Errorf("en menu item %d = %q, want %q", i, labels[i], want[i])
+		}
+	}
+	if en[0].Label == zh[0].Label {
+		t.Error("labels should differ between languages")
+	}
+}

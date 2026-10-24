@@ -80,3 +80,71 @@ func TestStoreSaveLoadRoundtrip(t *testing.T) {
 		t.Fatal("should be deleted")
 	}
 }
+
+// sshd 这类 connector 必须搭配同名 dialer，且认证写在 dialer 上，
+// 否则 gost 报 "ssh: invalid connection"（dialer 只给了裸 TCP）。
+func TestBuildYAMLSSHDNode(t *testing.T) {
+	p := &Profile{
+		Kind: KindProxy, Listen: ":8026", Proto: "http",
+		UpEnabled: true, UpProto: "sshd",
+		UpAddr: "1.2.3.4:8081", UpUser: "gost", UpPass: "xxx",
+	}
+	y, err := p.BuildYAML()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(y)
+	if !strings.Contains(s, "connector:\n              type: sshd") {
+		t.Errorf("connector type wrong:\n%s", s)
+	}
+	if !strings.Contains(s, "dialer:\n              type: sshd") {
+		t.Errorf("dialer must mirror sshd:\n%s", s)
+	}
+	// 认证应在 dialer 下（紧跟 dialer 的 type），connector 下不应有 auth
+	di := strings.Index(s, "dialer:")
+	if !strings.Contains(s[di:], "auth:") {
+		t.Errorf("auth should live under dialer:\n%s", s)
+	}
+	ci := strings.Index(s, "connector:")
+	if strings.Contains(s[ci:di], "auth:") {
+		t.Errorf("connector should not carry auth for sshd:\n%s", s)
+	}
+}
+
+// 普通 connector（如 socks5）保持 dialer=tcp、认证在 connector 上。
+func TestBuildYAMLProxyNodeKeepsTCPDialer(t *testing.T) {
+	p := &Profile{
+		Kind: KindProxy, Listen: ":8026", UpEnabled: true,
+		UpProto: "socks5", UpAddr: "1.2.3.4:1080", UpUser: "u", UpPass: "p",
+	}
+	y, err := p.BuildYAML()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(y)
+	if !strings.Contains(s, "dialer:\n              type: tcp") {
+		t.Errorf("socks5 should keep tcp dialer:\n%s", s)
+	}
+	di := strings.Index(s, "dialer:")
+	if strings.Contains(s[di:], "auth:") {
+		t.Errorf("socks5 auth belongs to connector, not dialer:\n%s", s)
+	}
+}
+
+func TestDialerFor(t *testing.T) {
+	cases := map[string]string{
+		"sshd":   "sshd",
+		"ssh":    "ssh",
+		"tls":    "tls",
+		"socks5": "tcp",
+		"http":   "tcp",
+		"ss":     "tcp",
+		"ssu":    "udp",
+		"":       "tcp",
+	}
+	for in, want := range cases {
+		if got := DialerFor(in); got != want {
+			t.Errorf("DialerFor(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

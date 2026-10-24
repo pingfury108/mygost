@@ -7,6 +7,10 @@ import (
 	"time"
 
 	"github.com/egoist/mygo"
+	// MyGo 自身文案（菜单 Edit/View/Window、Undo/Copy 等）的中文翻译，
+	// 未 import 时框架字符串永远是英文，导致菜单中英混排。
+	_ "github.com/egoist/mygo/locales/zh-Hans"
+	_ "github.com/egoist/mygo/locales/zh-Hant"
 	"github.com/egoist/mygo/ui"
 	"github.com/egoist/mygo/ui/editor"
 	"mygost/internal/gostbin"
@@ -81,11 +85,19 @@ func main() {
 	if !mygo.App.RequestSingleInstanceLock() {
 		return
 	}
-	// 界面文案只有中文：让框架内建的字符串（搜索框占位、菜单角色名等）也是中文
-	mygo.App.SetLanguages("zh-Hans")
+	// 应用以中英两种语言书写：框架内建字符串（菜单角色名等）跟随系统语言
+	mygo.App.SetLanguages("en", "zh-Hans")
 	a := newApp()
 
 	mygo.App.WhenReady(func() {
+		// 菜单/托盘文案跟随系统语言；打一行日志便于排查
+		loc, zh := currentLocale()
+		log.Printf("locale=%q zh=%v", loc, zh)
+		mygo.App.OnLocaleChanged(func(locale string) {
+			detectLang()
+			a.setupAppMenu()
+			a.refreshTray()
+		})
 		// 设置页表单初值
 		s := a.st.Get()
 		a.sGostPath = s.GostPath

@@ -89,11 +89,18 @@ func (p *Profile) BuildYAML() ([]byte, error) {
 			b.WriteString("        nodes:\n")
 			b.WriteString("          - name: node-0\n")
 			fmt.Fprintf(&b, "            addr: %q\n", p.UpAddr)
+			connectorType := orDefault(p.UpProto, "socks5")
+			dialerType := DialerFor(connectorType)
 			b.WriteString("            connector:\n")
-			fmt.Fprintf(&b, "              type: %s\n", orDefault(p.UpProto, "socks5"))
-			writeAuth(&b, 14, p.UpUser, p.UpPass)
+			fmt.Fprintf(&b, "              type: %s\n", connectorType)
+			if !authOnDialer(dialerType) {
+				writeAuth(&b, 14, p.UpUser, p.UpPass)
+			}
 			b.WriteString("            dialer:\n")
-			b.WriteString("              type: tcp\n")
+			fmt.Fprintf(&b, "              type: %s\n", dialerType)
+			if authOnDialer(dialerType) {
+				writeAuth(&b, 14, p.UpUser, p.UpPass)
+			}
 		}
 	case KindForward:
 		targets := splitTargets(p.Targets)
@@ -135,6 +142,37 @@ func writeAuth(b *strings.Builder, indent int, user, pass string) {
 	b.WriteString(pad + "auth:\n")
 	fmt.Fprintf(b, "%s  username: %q\n", pad, user)
 	fmt.Fprintf(b, "%s  password: %q\n", pad, pass)
+}
+
+// DialerTypes 是 gost 支持的连接方式（dialer），与 connector 是两个维度。
+var DialerTypes = []string{
+	"tcp", "udp", "tls", "mtls", "ws", "mws", "http2", "http3", "grpc", "quic",
+	"kcp", "mtcp", "ssh", "sshd", "unix", "serial", "direct", "dtls", "ftcp",
+	"icmp", "utls", "wg", "obfs", "pht", "masque",
+}
+
+// DialerFor 推导节点应使用的 dialer 类型。
+//
+// gost 命令行里 `sshd://host:port` 的 scheme 同时作为 connector 和 dialer，
+// 因此只写 connector 而 dialer 留成 tcp 是错的：sshd connector 要求底层连接
+// 已经是 SSH 会话（*ssh_util.ClientConn），否则报 "ssh: invalid connection"。
+func DialerFor(connector string) string {
+	c := strings.ToLower(strings.TrimSpace(connector))
+	if c == "ssu" { // 与 gost 命令行一致：ssu 走 UDP
+		return "udp"
+	}
+	for _, d := range DialerTypes {
+		if d == c {
+			return d
+		}
+	}
+	return "tcp"
+}
+
+// authOnDialer 判断认证信息应写在 dialer 还是 connector 上。
+// gost 对 ssh/sshd 把 SSH 登录凭据放在 dialer.auth，其余放在 connector.auth。
+func authOnDialer(dialer string) bool {
+	return dialer == "ssh" || dialer == "sshd"
 }
 
 // ConnectorTypes 是 gost 支持的转发链节点类型（connector），
