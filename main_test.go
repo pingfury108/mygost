@@ -178,3 +178,42 @@ func TestConnectGeometry(t *testing.T) {
 		t.Fatalf("halo(%v) 应为 button(%v)+2*sp3(%v)", halo, btn, sp3)
 	}
 }
+
+// 编辑页应提供"粘贴 gost 命令"的导入入口，并能填满表单。
+func TestImportCommandToForm(t *testing.T) {
+	a := newTestApp(t)
+	a.startNew()
+	tt := ui.NewTester(a.view, 430, 660)
+	if !tt.HasText("导入") {
+		t.Errorf("editor should offer an import action, texts %q", tt.Texts())
+	}
+
+	a.importText = "gost -L=:8080 -F sshd://gost:xxx@149.129.41.181:8081"
+	a.applyImport()
+	if a.formErr != "" {
+		t.Fatalf("import failed: %s", a.formErr)
+	}
+	if a.form.Listen != ":8080" {
+		t.Errorf("listen %q", a.form.Listen)
+	}
+	if !a.form.UpEnabled || a.form.UpProto != "sshd" {
+		t.Errorf("upstream %+v", a.form)
+	}
+	if a.form.UpAddr != "149.129.41.181:8081" || a.form.UpUser != "gost" || a.form.UpPass != "xxx" {
+		t.Errorf("upstream node %+v", a.form)
+	}
+	if a.chainPreview() != "-F sshd://gost:***@149.129.41.181:8081" {
+		t.Errorf("preview %q", a.chainPreview())
+	}
+}
+
+// 无法解析的输入要给出内联错误，且不改动表单。
+func TestImportInvalidShowsError(t *testing.T) {
+	a := newTestApp(t)
+	a.startNew()
+	a.importText = "sshd://"
+	a.applyImport()
+	if a.formErr == "" {
+		t.Fatal("invalid input should set formErr")
+	}
+}

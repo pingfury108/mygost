@@ -42,6 +42,7 @@ type app struct {
 	formKind   int    // Segmented 索引
 	formUpOpen bool   // 上游转发链折叠区
 	formErr    string // 表单内联错误
+	importText string // 粘贴的 gost 命令/链接
 	customBuf  *editor.State
 
 	// 日志页
