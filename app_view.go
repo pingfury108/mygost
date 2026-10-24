@@ -23,7 +23,7 @@ func kvRow(c *ui.Context, key, val string) {
 	t := c.Theme()
 	ui.Row(c).FillWidth().Gap(sp3).AlignItems(ui.Start).Children(func() {
 		ui.Text(c, key).FontSize(fsBody).TextColor(t.TextMuted).Width(72).Shrink(0)
-		ui.Text(c, val).FontSize(fsBody).Grow(1).Ellipsis("end")
+		ui.Text(c, val).FontSize(fsBody).Grow(1).SingleLine()
 	})
 }
 
@@ -94,7 +94,9 @@ func subPage(c *ui.Context, title string, back func(), body func(*ui.Context)) {
 				back()
 			}
 		})
-		body(c)
+		// body 必须占满剩余高度：否则它内部的 Fill/Grow 拿到的是内容高度，
+		// 固定底栏会被推到窗口外面
+		ui.Box(c).FillWidth().Grow(1).Children(func() { body(c) })
 	})
 }
 

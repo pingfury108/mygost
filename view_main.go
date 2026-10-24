@@ -162,8 +162,7 @@ func (a *app) profileRow(c *ui.Context, p *profiles.Profile, isCurrent, isRunnin
 					}
 					ui.Text(c, profiles.KindLabel(p.Kind)).FontSize(fsCaption).TextColor(t.TextMuted)
 				})
-				ui.Text(c, p.Summary()).FontSize(fsBody).TextColor(t.TextMuted).
-					Ellipsis("end")
+				ui.Text(c, p.Summary()).FontSize(fsBody).TextColor(t.TextMuted).SingleLine()
 			})
 
 			// 右侧：菜单

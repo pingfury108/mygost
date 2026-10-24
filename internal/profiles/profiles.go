@@ -137,6 +137,14 @@ func writeAuth(b *strings.Builder, indent int, user, pass string) {
 	fmt.Fprintf(b, "%s  password: %q\n", pad, pass)
 }
 
+// ConnectorTypes 是 gost 支持的转发链节点类型（connector），
+// 从 gost v3 的注册表整理，按常用度排序。
+var ConnectorTypes = []string{
+	"socks5", "http", "sshd", "ssh", "ss", "relay", "forward", "sni",
+	"socks4", "socks4a", "socks", "http2", "tunnel", "tcp", "unix",
+	"direct", "masque", "router", "serial",
+}
+
 // KindLabel 返回类型显示名。
 func KindLabel(k Kind) string {
 	switch k {

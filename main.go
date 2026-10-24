@@ -42,7 +42,7 @@ type app struct {
 	formKind   int    // Segmented 索引
 	formUpOpen bool   // 上游转发链折叠区
 	formErr    string // 表单内联错误
-	importText string // 粘贴的 gost 命令/链接
+	cmdPreview string // 等效命令（只读，每帧重算）
 	customBuf  *editor.State
 
 	// 日志页
@@ -81,6 +81,8 @@ func main() {
 	if !mygo.App.RequestSingleInstanceLock() {
 		return
 	}
+	// 界面文案只有中文：让框架内建的字符串（搜索框占位、菜单角色名等）也是中文
+	mygo.App.SetLanguages("zh-Hans")
 	a := newApp()
 
 	mygo.App.WhenReady(func() {

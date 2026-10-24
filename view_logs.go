@@ -33,7 +33,7 @@ func (a *app) viewLogs(c *ui.Context) {
 	ui.Column(c).Fill().Padding(sp4).Gap(sp3).Children(func() {
 		// 工具栏：搜索占满，其余为图标/次级按钮
 		ui.Row(c).FillWidth().Gap(sp2).AlignItems(ui.Center).Children(func() {
-			ui.SearchField(c, &a.logFilter).Grow(1)
+			ui.TextInput(c, &a.logFilter).Grow(1).Placeholder("搜索日志…")
 			ui.Button(c, "复制").OnClick(func() {
 				c.Services().WriteClipboard(joinLines(shown)) // 所见即所得
 			})

@@ -100,8 +100,8 @@ func TestEditorView(t *testing.T) {
 	if !tt.HasText("保存") {
 		t.Errorf("editor should render form actions, texts %q", tt.Texts())
 	}
-	if !tt.HasText("监听地址") {
-		t.Errorf("proxy form should show listen field, texts %q", tt.Texts())
+	if !tt.HasText("本机监听") {
+		t.Errorf("proxy form should show the listener section, texts %q", tt.Texts())
 	}
 }
 
@@ -179,41 +179,33 @@ func TestConnectGeometry(t *testing.T) {
 	}
 }
 
-// 编辑页应提供"粘贴 gost 命令"的导入入口，并能填满表单。
-func TestImportCommandToForm(t *testing.T) {
+// 表单对齐回归：同一节的等宽两列，跨行的同列字段必须左边缘对齐。
+// 曾因两行各自 Grow(1) 分配比例不同而错位。
+func TestFormColumnsAligned(t *testing.T) {
 	a := newTestApp(t)
 	a.startNew()
-	tt := ui.NewTester(a.view, 430, 660)
-	if !tt.HasText("导入") {
-		t.Errorf("editor should offer an import action, texts %q", tt.Texts())
-	}
+	a.form.UpEnabled = true
+	tt := ui.NewTester(a.view, 430, 900)
 
-	a.importText = "gost -L=:8080 -F sshd://gost:xxx@149.129.41.181:8081"
-	a.applyImport()
-	if a.formErr != "" {
-		t.Fatalf("import failed: %s", a.formErr)
+	x := func(label string) float32 {
+		r, ok := tt.Find(label)
+		if !ok {
+			t.Fatalf("label %q not found", label)
+		}
+		return r.X
 	}
-	if a.form.Listen != ":8080" {
-		t.Errorf("listen %q", a.form.Listen)
+	// ① 本机监听：同一列跨行必须同 x
+	if got, want := x("账号（可选）"), x("地址"); got != want {
+		t.Errorf("左列未对齐：地址 x=%.1f，账号 x=%.1f", want, got)
 	}
-	if !a.form.UpEnabled || a.form.UpProto != "sshd" {
-		t.Errorf("upstream %+v", a.form)
+	if got, want := x("密码（可选）"), x("协议"); got != want {
+		t.Errorf("右列未对齐：协议 x=%.1f，密码 x=%.1f", want, got)
 	}
-	if a.form.UpAddr != "149.129.41.181:8081" || a.form.UpUser != "gost" || a.form.UpPass != "xxx" {
-		t.Errorf("upstream node %+v", a.form)
+	// ② 上游节点：同样规则
+	if got, want := x("服务器账号（可选）"), x("服务器协议"); got != want {
+		t.Errorf("上游左列未对齐：服务器协议 x=%.1f，服务器账号 x=%.1f", want, got)
 	}
-	if a.chainPreview() != "-F sshd://gost:***@149.129.41.181:8081" {
-		t.Errorf("preview %q", a.chainPreview())
-	}
-}
-
-// 无法解析的输入要给出内联错误，且不改动表单。
-func TestImportInvalidShowsError(t *testing.T) {
-	a := newTestApp(t)
-	a.startNew()
-	a.importText = "sshd://"
-	a.applyImport()
-	if a.formErr == "" {
-		t.Fatal("invalid input should set formErr")
+	if got, want := x("服务器密码（可选）"), x("服务器地址"); got != want {
+		t.Errorf("上游右列未对齐：服务器地址 x=%.1f，服务器密码 x=%.1f", want, got)
 	}
 }

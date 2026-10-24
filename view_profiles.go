@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"strings"
 
 	"github.com/egoist/mygo/ui"
@@ -13,122 +14,174 @@ import (
 var kindNames = []string{"代理", "端口转发", "YAML"}
 var kindValues = []profiles.Kind{profiles.KindProxy, profiles.KindForward, profiles.KindCustom}
 
-// viewProfileForm 新建/编辑表单（子页面，窄窗口单列）。
+// proxyHandlers 是"代理"类型的可用协议：决定本机以什么协议对外提供代理。
+var proxyHandlers = []string{"http", "socks5", "socks4", "ss", "relay", "sni"}
+
+// viewProfileForm 新建/编辑表单：按 ①②③ 分节，与 gost 命令逐段对应。
 func (a *app) viewProfileForm(c *ui.Context) {
 	t := c.Theme()
-	ui.Column(c).FillWidth().Padding(sp4).Gap(sp3).Children(func() {
-		// 从 gost 命令/链接导入：解决"配置看不懂"的入口
-		a.importRow(c)
-
-		if ui.Segmented(c, &a.formKind, kindNames...).Label("类型").Changed() {
-			a.syncFormKind()
-			a.formErr = ""
-		}
-
-		switch kindValues[a.formKind] {
-		case profiles.KindProxy:
-			a.proxyForm(c)
-		case profiles.KindForward:
-			a.forwardForm(c)
-		case profiles.KindCustom:
-			a.customForm(c)
-		}
-
-		// 内联错误：字段级别提示，不只靠 toast
-		if a.formErr != "" {
-			ui.Text(c, a.formErr).FontSize(fsCaption).TextColor(t.Danger)
-		}
-
-		ui.Box(c).Grow(1)
-
-		// 底部操作：保存为主（2/3），取消为次（1/3）
-		ui.Row(c).FillWidth().Gap(sp2).Children(func() {
-			ui.Button(c, "取消").Grow(1).OnClick(func() {
+	ui.Column(c).Fill().Children(func() {
+		// 顶部固定：类型切换是模式开关，滚动表单时也应常驻。
+		// 用文字标签页而非分段控件：无灰色轨道，视觉更轻，语义是"切换下方内容"。
+		ui.Column(c).FillWidth().Padding(sp2, sp4, 0).Gap(sp2).Children(func() {
+			if ui.Tabs(c, &a.formKind, kindNames...).Label("配置类型").Changed() {
+				a.syncFormKind()
 				a.formErr = ""
-				a.goMain()
-			})
-			ui.PrimaryButton(c, "保存").Grow(2).OnClick(a.saveEdit)
+			}
+			ui.Box(c).FillWidth().Height(1).Background(t.Border).Opacity(0.6)
 		})
-	})
-}
 
-// formName 名称字段（各类型共用）。
-func formName(c *ui.Context, a *app) {
-	ui.Field(c, "名称", func() {
-		ui.TextInput(c, &a.form.Name).Placeholder("如：本机代理")
-	})
-}
-
-func (a *app) proxyForm(c *ui.Context) {
-	t := c.Theme()
-	card(c).Children(func() {
-		ui.Column(c).FillWidth().Gap(sp3).Children(func() {
-			formName(c, a)
-			ui.Row(c).FillWidth().Gap(sp3).Children(func() {
-				ui.Field(c, "监听地址", func() {
-					ui.TextInput(c, &a.form.Listen).Grow(1).Placeholder(":8080")
-				})
-				ui.Field(c, "协议", func() {
-					ui.Select(c, &a.form.Proto, []string{"http", "socks5", "relay"}).Width(120)
-				})
+		// 中间区：表单滚动；YAML 编辑器直接占满可视区（放进滚动容器会算不出高度）
+		if kindValues[a.formKind] == profiles.KindCustom {
+			ui.Box(c).FillWidth().Grow(1).Padding(sp3, sp4, sp2).Children(func() {
+				a.customForm(c)
 			})
-			ui.Row(c).FillWidth().Gap(sp3).Children(func() {
-				ui.Field(c, "用户名（可选）", func() {
-					ui.TextInput(c, &a.form.User).Grow(1)
-				})
-				ui.Field(c, "密码（可选）", func() {
-					ui.TextInput(c, &a.form.Password).Grow(1).Password()
-				})
-			})
-
-			// 高级：上游转发链（-F，低频功能，默认折叠）
-			ui.Divider(c)
-			ui.Collapsible(c, "上游转发链（-F，经由另一台代理出网）", &a.formUpOpen, func() {
-				ui.Column(c).FillWidth().Gap(sp3).Padding(sp1, 0).Children(func() {
-					settingRow(c, "启用上游", "流量先送到上游，再由上游连目标", func() {
-						ui.Switch(c, &a.form.UpEnabled)
-					})
-					if a.form.UpEnabled {
-						ui.Row(c).FillWidth().Gap(sp3).Children(func() {
-							ui.Field(c, "类型", func() {
-								ui.Select(c, &a.form.UpProto, profiles.ConnectorTypes).Grow(1)
-							})
-							ui.Field(c, "地址", func() {
-								ui.TextInput(c, &a.form.UpAddr).Grow(1).Placeholder("149.129.41.181:8081")
-							})
-						})
-						ui.Row(c).FillWidth().Gap(sp3).Children(func() {
-							ui.Field(c, "用户名（可选）", func() {
-								ui.TextInput(c, &a.form.UpUser).Grow(1)
-							})
-							ui.Field(c, "密码（可选）", func() {
-								ui.TextInput(c, &a.form.UpPass).Grow(1).Password()
-							})
-						})
-						// 等价写法：让表单能和 gost 文档里的命令行对上号
-						ui.Text(c, a.chainPreview()).FontSize(fsCaption).
-							Font("monospace").TextColor(t.TextMuted).Ellipsis("end")
+		} else {
+			ui.Scroll(c).FillWidth().Grow(1).Shrink(1).Children(func() {
+				ui.Column(c).FillWidth().Padding(sp3, sp4, sp2).Gap(sp4).Children(func() {
+					if kindValues[a.formKind] == profiles.KindForward {
+						a.forwardForm(c)
+					} else {
+						a.proxyForm(c)
 					}
 				})
 			})
+		}
+
+		// 固定底栏：等效命令 + 错误提示 + 操作，始终可见
+		ui.Column(c).FillWidth().Gap(sp2).Padding(sp2, sp4, sp4).Children(func() {
+			// 等效命令：界面填写的内容翻译成命令行。
+			// 用只读输入框而非文本：超宽时可横向滚动，也能选中复制。
+			ui.Column(c).FillWidth().Gap(sp1).Children(func() {
+				ui.Text(c, "等效命令").FontSize(fsCaption).TextColor(t.TextMuted)
+				a.cmdPreview = a.commandPreview()
+				ui.TextInput(c, &a.cmdPreview).ReadOnly(true).
+					Font("monospace").FontSize(fsMono)
+			})
+			if a.formErr != "" {
+				ui.Text(c, a.formErr).FontSize(fsCaption).TextColor(t.Danger)
+			}
+			ui.Row(c).FillWidth().Gap(sp2).Children(func() {
+				ui.Button(c, "取消").Grow(1).OnClick(func() {
+					a.formErr = ""
+					a.goMain()
+				})
+				ui.PrimaryButton(c, "保存").Grow(2).OnClick(a.saveEdit)
+			})
 		})
 	})
 }
 
-func (a *app) forwardForm(c *ui.Context) {
+// formSection 是表单里的一节：大标题 + 一句话说明 + 内容。
+func formSection(c *ui.Context, title, desc string, body func()) {
+	t := c.Theme()
+	ui.Column(c).FillWidth().Gap(sp2).Children(func() {
+		ui.Column(c).FillWidth().Gap(1).Children(func() {
+			ui.Text(c, title).FontSize(fsBody).Bold()
+			if desc != "" {
+				ui.Text(c, desc).FontSize(fsCaption).TextColor(t.TextMuted)
+			}
+		})
+		body()
+	})
+}
+
+// proxyForm 是"代理"表单：
+//
+//	① 本机监听  = gost -L
+//	② 出网方式  = 直连 / -F 上游
+//	③ 名称
+func (a *app) proxyForm(c *ui.Context) {
 	card(c).Children(func() {
-		ui.Column(c).FillWidth().Gap(sp3).Children(func() {
-			formName(c, a)
-			ui.Row(c).FillWidth().Gap(sp3).Children(func() {
-				ui.Field(c, "监听地址", func() {
-					ui.TextInput(c, &a.form.Listen).Grow(1).Placeholder(":2222")
-				})
-				ui.Field(c, "协议", func() {
-					ui.Select(c, &a.form.FwdProto, []string{"tcp", "udp"}).Width(120)
+		ui.Column(c).FillWidth().Gap(sp4).Children(func() {
+			formSection(c, "① 本机监听", "在这台机器上开一个代理端口", func() {
+				// 等宽两列网格：跨行字段始终对齐
+				ui.Grid(c).FillWidth().Columns(2).Gap(sp3).Children(func() {
+					ui.Field(c, "地址", func() {
+						ui.TextInput(c, &a.form.Listen).FillWidth().Placeholder(":8080")
+					})
+					ui.Field(c, "协议", func() {
+						ui.Select(c, &a.form.Proto, proxyHandlers).FillWidth()
+					})
+					ui.Field(c, "账号（可选）", func() {
+						ui.TextInput(c, &a.form.User).FillWidth().
+							Placeholder("留空则无需认证")
+					})
+					ui.Field(c, "密码（可选）", func() {
+						ui.TextInput(c, &a.form.Password).FillWidth().Password()
+					})
 				})
 			})
-			ui.Field(c, "目标地址（每行一个，多个为负载均衡）", func() {
-				ui.TextArea(c, &a.form.Targets).Lines(3, 6).Placeholder("192.168.1.1:22")
+
+			divider(c)
+
+			formSection(c, "② 出网方式", "流量从哪里连到目标", func() {
+				usingUp := a.form.UpEnabled
+				ui.RadioGroup(c, func() {
+					ui.Radio(c, &usingUp, false, "直连目标：本机直接连出去")
+					ui.Radio(c, &usingUp, true, "经上游服务器：先连服务器，由它代连（-F）")
+				})
+				if usingUp != a.form.UpEnabled {
+					a.form.UpEnabled = usingUp
+				}
+				if a.form.UpEnabled {
+					ui.Box(c).FillWidth().Padding(sp3).Radius(rRow).
+						Background(c.Theme().Background).Children(func() {
+						ui.Grid(c).FillWidth().Columns(2).Gap(sp3).Children(func() {
+							ui.Field(c, "服务器协议", func() {
+								ui.Select(c, &a.form.UpProto, profiles.ConnectorTypes).FillWidth()
+							})
+							ui.Field(c, "服务器地址", func() {
+								ui.TextInput(c, &a.form.UpAddr).FillWidth().
+									Placeholder("主机:端口")
+							})
+							ui.Field(c, "服务器账号（可选）", func() {
+								ui.TextInput(c, &a.form.UpUser).FillWidth()
+							})
+							ui.Field(c, "服务器密码（可选）", func() {
+								ui.TextInput(c, &a.form.UpPass).FillWidth().Password()
+							})
+						})
+					})
+				}
+			})
+
+			divider(c)
+
+			formSection(c, "③ 名称", "只用于列表显示", func() {
+				ui.TextInput(c, &a.form.Name).Placeholder("如：家里出口")
+			})
+		})
+	})
+}
+
+// forwardForm 是"端口转发"表单：
+//
+//	① 本机监听 -L ② 转发目标 ③ 名称
+func (a *app) forwardForm(c *ui.Context) {
+	card(c).Children(func() {
+		ui.Column(c).FillWidth().Gap(sp4).Children(func() {
+			formSection(c, "① 本机监听", "在这台机器上开一个端口", func() {
+				ui.Grid(c).FillWidth().Columns(2).Gap(sp3).Children(func() {
+					ui.Field(c, "地址", func() {
+						ui.TextInput(c, &a.form.Listen).FillWidth().Placeholder(":2222")
+					})
+					ui.Field(c, "协议", func() {
+						ui.Select(c, &a.form.FwdProto, []string{"tcp", "udp"}).FillWidth()
+					})
+				})
+			})
+
+			divider(c)
+
+			formSection(c, "② 转发到", "连接本机端口时，实际连到这些地址（多个即负载均衡）", func() {
+				ui.TextArea(c, &a.form.Targets).Lines(3, 6).Placeholder("192.168.1.10:22")
+			})
+
+			divider(c)
+
+			formSection(c, "③ 名称", "只用于列表显示", func() {
+				ui.TextInput(c, &a.form.Name).Placeholder("如：家里 NAS")
 			})
 		})
 	})
@@ -136,19 +189,91 @@ func (a *app) forwardForm(c *ui.Context) {
 
 func (a *app) customForm(c *ui.Context) {
 	t := c.Theme()
-	ui.Text(c, "直接编辑 gost.yml，支持 gost 全部能力。").FontSize(fsCaption).TextColor(t.TextMuted)
-	ui.Box(c).FillWidth().Grow(1).HeightPercent(60).Radius(rCard).Background(t.Surface).Children(func() {
-		if a.customBuf != nil {
+	ui.Column(c).Fill().Gap(sp2).Children(func() {
+		ui.Text(c, "直接编辑 gost.yml，支持 gost 全部能力。").
+			FontSize(fsCaption).TextColor(t.TextMuted)
+		// 编辑器占满剩余高度；缓冲缺失时兜底创建，避免出现空白区
+		ui.Box(c).FillWidth().Grow(1).Radius(rCard).Clip().
+			Background(t.Background).Border(1, t.Border).Children(func() {
+			if a.customBuf == nil {
+				a.customBuf = newYAMLBuffer(a.yamlSeed())
+			}
 			editor.View(c, a.customBuf).Fill()
-		}
+		})
 	})
 }
 
-func (a *app) formTitle() string {
-	if a.form.ID == "" {
-		return "新建配置"
+// commandPreview 把当前表单翻译成 gost 命令行，供用户与文档对照。
+func (a *app) commandPreview() string {
+	listen := strings.TrimSpace(a.form.Listen)
+	if listen == "" {
+		switch kindValues[a.formKind] {
+		case profiles.KindForward:
+			listen = ":2222"
+		default:
+			listen = ":8080"
+		}
 	}
-	return "编辑配置"
+	proto := a.form.Proto
+	switch kindValues[a.formKind] {
+	case profiles.KindForward:
+		proto = orDefault(a.form.FwdProto, "tcp")
+		first := firstTarget(a.form.Targets)
+		if first == "" {
+			first = "目标地址"
+		}
+		return "gost -L=" + proto + "://" + listen + "/" + first
+	case profiles.KindCustom:
+		return "gost -C gost.yml"
+	}
+
+	proto = orDefault(proto, "http")
+	cmd := "gost -L=" + proto + "://"
+	if a.form.User != "" {
+		cmd += a.form.User + ":***@"
+	}
+	cmd += listen
+	if a.form.UpEnabled {
+		cmd += " " + a.chainPreview()
+	}
+	return cmd
+}
+
+// chainPreview 返回上游节点的 gost 等价写法（-F ...），密码打码。
+func (a *app) chainPreview() string {
+	proto := orDefault(a.form.UpProto, "socks5")
+	auth := ""
+	if a.form.UpUser != "" {
+		auth = a.form.UpUser
+		if a.form.UpPass != "" {
+			auth += ":***"
+		}
+		auth += "@"
+	}
+	return "-F " + proto + "://" + auth + a.form.UpAddr
+}
+
+func orDefault(s, def string) string {
+	if strings.TrimSpace(s) == "" {
+		return def
+	}
+	return s
+}
+
+func firstTarget(targets string) string {
+	for _, line := range strings.FieldsFunc(targets, func(r rune) bool { return r == '\n' || r == ',' }) {
+		if v := strings.TrimSpace(line); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// formName 名称字段（保留给 YAML 之外的简化调用）。
+func formName(c *ui.Context, a *app) {
+	ui.Field(c, "名称", func() {
+		ui.TextInput(c, &a.form.Name).Placeholder("如：本机代理")
+	})
 }
 
 // startNew 进入新建表单。
@@ -158,7 +283,8 @@ func (a *app) startNew() {
 		FwdProto: "tcp", UpProto: "socks5",
 	}
 	a.formKind = 0
-	a.formUpOpen = false
+	a.formUpOpen = true
+	a.formErr = ""
 	a.customBuf = nil
 	a.page = "editor"
 }
@@ -173,6 +299,7 @@ func (a *app) startEdit(p *profiles.Profile) {
 		}
 	}
 	a.formUpOpen = p.UpEnabled
+	a.formErr = ""
 	a.customBuf = nil
 	if p.Kind == profiles.KindCustom {
 		a.customBuf = newYAMLBuffer(p.YAML)
@@ -180,17 +307,43 @@ func (a *app) startEdit(p *profiles.Profile) {
 	a.page = "editor"
 }
 
+func (a *app) formTitle() string {
+	if a.form.ID == "" {
+		return "新建配置"
+	}
+	return "编辑配置"
+}
+
 // syncFormKind 在切换类型时准备 custom 编辑器缓冲。
 func (a *app) syncFormKind() {
 	if kindValues[a.formKind] == profiles.KindCustom {
-		src := a.form.YAML
-		if src == "" {
-			if y, err := a.form.BuildYAML(); err == nil {
-				src = string(y)
-			}
-		}
-		a.customBuf = newYAMLBuffer(src)
+		a.customBuf = newYAMLBuffer(a.yamlSeed())
 	}
+}
+
+// yamlTemplate 是 YAML 模式的起始内容：有表单内容就沿用，否则给一个最小可用配置。
+const yamlTemplate = `services:
+  - name: mygost
+    addr: ":8080"
+    handler:
+      type: http
+    listener:
+      type: tcp
+`
+
+// yamlSeed 返回 YAML 编辑器的初始文本。
+func (a *app) yamlSeed() string {
+	if src := strings.TrimSpace(a.form.YAML); src != "" {
+		return src
+	}
+	// 表单能生成就用表单生成的，用户能看到自己刚填的内容。
+	// 用副本生成，避免在渲染过程里改动应用状态。
+	cp := a.form
+	cp.Kind = profiles.KindProxy
+	if y, err := cp.BuildYAML(); err == nil && len(bytes.TrimSpace(y)) > 0 {
+		return string(y)
+	}
+	return yamlTemplate
 }
 
 // saveEdit 校验并保存。
@@ -232,78 +385,4 @@ func newYAMLBuffer(src string) *editor.State {
 func yamlValid(s string) bool {
 	var v map[string]any
 	return yaml.Unmarshal([]byte(s), &v) == nil
-}
-
-// importRow 是"粘贴 gost 命令或链接"的导入行。
-func (a *app) importRow(c *ui.Context) {
-	t := c.Theme()
-	ui.Column(c).FillWidth().Gap(sp2).Children(func() {
-		ui.Row(c).FillWidth().Gap(sp2).AlignItems(ui.Center).Children(func() {
-			ui.TextInput(c, &a.importText).Grow(1).
-				Placeholder("粘贴 gost 命令或 -F 链接").
-				OnSubmit(a.applyImport)
-			ui.Button(c, "导入").OnClick(a.applyImport)
-		})
-		ui.Text(c, "例：gost -L=:8080 -F sshd://user:pass@1.2.3.4:8081").
-			FontSize(fsCaption).Font("monospace").TextColor(t.TextMuted).Ellipsis("end")
-	})
-}
-
-// applyImport 解析粘贴的命令/链接并填进表单。
-func (a *app) applyImport() {
-	raw := strings.TrimSpace(a.importText)
-	if raw == "" {
-		return
-	}
-	listen, chain, hasChain, err := profiles.ParseCommand(raw)
-	if err != nil {
-		a.formErr = "无法解析：" + err.Error()
-		return
-	}
-
-	// 有转发链或只有链接时按"代理"处理
-	a.formKind = 0
-	a.form.Kind = profiles.KindProxy
-	if listen.Addr != "" {
-		a.form.Listen = listen.Addr
-	}
-	if listen.Type != "" {
-		a.form.Proto = listen.Type
-	}
-	if listen.User != "" {
-		a.form.User = listen.User
-		a.form.Password = listen.Pass
-	}
-	if hasChain || (listen.Addr == "" && chain.Addr != "") {
-		a.form.UpEnabled = true
-		a.formUpOpen = true
-		if chain.Type != "" {
-			a.form.UpProto = chain.Type
-		}
-		a.form.UpAddr = chain.Addr
-		a.form.UpUser = chain.User
-		a.form.UpPass = chain.Pass
-	}
-	if a.form.Name == "" {
-		a.form.Name = "导入配置"
-	}
-	a.importText = ""
-	a.formErr = ""
-}
-
-// chainPreview 返回上游节点的 gost 等价写法，便于和文档对照。
-func (a *app) chainPreview() string {
-	proto := a.form.UpProto
-	if proto == "" {
-		proto = "socks5"
-	}
-	auth := ""
-	if a.form.UpUser != "" {
-		auth = a.form.UpUser
-		if a.form.UpPass != "" {
-			auth += ":***"
-		}
-		auth += "@"
-	}
-	return "-F " + proto + "://" + auth + a.form.UpAddr
 }
