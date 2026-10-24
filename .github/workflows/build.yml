@@ -1,0 +1,106 @@
+name: Build
+
+# 触发方式：
+#   1. 推 tag（v0.1.0）→ 构建并创建/更新同名 Release，附带安装包
+#   2. 手动运行（Actions 页面 Run workflow）→ 只构建，产物在 Artifacts
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write # tag 触发时创建 Release 并上传附件
+
+jobs:
+  test:
+    name: 测试
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: go vet ./...
+      - run: CGO_ENABLED=0 go test ./...
+
+  macos:
+    name: macOS（Intel + Apple Silicon）
+    runs-on: macos-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # 一次构建两种架构：build/darwin-amd64/ 与 build/darwin-arm64/ 各出一个 dmg
+      # 若要正式分发（不被 Gatekeeper 拦截），在此环境配置签名+公证：
+      #   - 导入 Developer ID 证书到临时钥匙串
+      #   - 设置 macos.signingIdentity / macos.notarize（见 mygo 文档）
+      # 未配置时 mygo 会自动 ad-hoc 签名并跳过公证，仅适合自用测试。
+      - name: 构建 dmg
+        run: go tool mygo build -platform "darwin/amd64,darwin/arm64"
+
+      - name: 列出产物
+        run: find build -name "*.dmg" -o -name "*.app" -maxdepth 3 | sort
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mygost-macos
+          path: build/darwin-*/*.dmg
+          if-no-files-found: error
+
+  windows:
+    name: Windows（x64）
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # Windows 安装包用 NSIS 在 Linux 上交叉生成
+      - name: 安装 NSIS
+        run: sudo apt-get update && sudo apt-get install -y nsis
+
+      - name: 构建安装包
+        run: go tool mygo build -platform "windows/amd64"
+
+      - name: 列出产物
+        run: find build/windows-amd64 -maxdepth 1 -type f | sort
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mygost-windows
+          path: build/windows-amd64/*.exe
+          if-no-files-found: error
+
+  release:
+    name: 发布
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [macos, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: 列出待发布文件
+        run: ls -la dist
+
+      - name: 创建或更新 Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="$GITHUB_REF_NAME"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$tag" dist/* --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$tag" dist/* --repo "$GITHUB_REPOSITORY" \
+              --title "$tag" --generate-notes
+          fi

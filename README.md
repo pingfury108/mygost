@@ -43,6 +43,29 @@ curl -L https://github.com/go-gost/gost/releases/download/v3.3.1/gost_3.3.1_darw
 go build -tags embedded -o build/mygost
 ```
 
+## 构建与发布
+
+本地打包：
+
+```bash
+go tool mygo build -platform "darwin/amd64,darwin/arm64,windows/amd64"
+```
+产物在 `build/<os>-<arch>/`：macOS 为 `mygost 0.1.0 <arch>.dmg`，Windows 为 `mygost Setup 0.1.0 amd64.exe`。
+
+CI（`.github/workflows/build.yml`）：
+
+| 触发 | 行为 |
+|---|---|
+| 推 tag `v*` | 测试 → 构建 macOS（Intel/Apple Silicon 各一个 dmg）+ Windows 安装包 → 创建 Release 并附上文件 |
+| 手动 Run workflow | 只构建，产物在 Actions 的 Artifacts |
+
+发布前把 `mygo.json` 的 `version` 改成与 tag 一致（如 `0.2.0` → `v0.2.0`）。
+
+> macOS 产物默认是 ad-hoc 签名、未公证，别的机器上首次打开会被 Gatekeeper 拦截。
+> 要正式分发，需在 workflow 的 macOS job 里导入 Developer ID 证书并在 `mygo.json` 配置
+> `macos.signingIdentity` / `macos.notarize`（见 mygo 文档 distribution.md、github-actions.md）。
+
+
 ## 目录结构
 
 ```
