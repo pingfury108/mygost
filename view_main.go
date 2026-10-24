@@ -52,17 +52,15 @@ func (a *app) viewDashboard(c *ui.Context) {
 			case current != "" && a.binFound:
 				btnColor, btnTextColor = t.Accent, t.AccentText
 			}
-			const d float32 = 88
-			ring := func() {
-				if !running {
-					return
-				}
-				ui.Box(c).Width(d + sp3*2).Height(d + sp3*2).Radius((d + sp3*2) / 2).
-					Background(successHalo(t))
+			// 光环与按钮同心：用等尺寸的 Box 包一层，尺寸必须显式给出，
+			// 否则 Column 会把它横向拉满，光环变成横贯窗口的椭圆。
+			d, ringSize := connectGeometry()
+			halo := ui.Box(c).Width(ringSize).Height(ringSize).
+				Radius(ringSize / 2).Center()
+			if running {
+				halo = halo.Background(successHalo(t))
 			}
-			// 光环与按钮同心：叠加在按钮下层会偏移，用 Box 叠放
-			ui.Box(c).Children(func() {
-				ring()
+			halo.Children(func() {
 				big := ui.ButtonBase(c).Width(d).Height(d).Radius(d / 2).Background(btnColor).
 					Cursor(ui.CursorPointer).Children(func() {
 					ui.Column(c).Fill().Center().Children(func() {
@@ -196,6 +194,15 @@ func (a *app) profileRow(c *ui.Context, p *profiles.Profile, isCurrent, isRunnin
 			a.delOpen = true
 		}
 	})
+}
+
+// connectGeometry 返回大圆按钮与光环的边长。
+//
+// 两者都必须显式给出尺寸：Column 会把未定宽的 Box 横向拉满，
+// 光环就会变成横贯窗口的椭圆（v0.1 曾如此）。
+func connectGeometry() (button, halo float32) {
+	const d float32 = 88
+	return d, d + sp3*2
 }
 
 // toggleMain 主按钮：运行则断开，否则连接当前档。

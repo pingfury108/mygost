@@ -170,3 +170,11 @@ func TestSoftColors(t *testing.T) {
 		}
 	}
 }
+
+// 布局回归：光环必须比按钮大一圈，且两者尺寸显式（不可依赖父容器拉伸）。
+func TestConnectGeometry(t *testing.T) {
+	btn, halo := connectGeometry()
+	if btn <= 0 || halo != btn+sp3*2 {
+		t.Fatalf("halo(%v) 应为 button(%v)+2*sp3(%v)", halo, btn, sp3)
+	}
+}
