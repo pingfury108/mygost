@@ -10,6 +10,8 @@ import (
 
 	"github.com/egoist/mygo/ui"
 	"mygost/internal/geo"
+	"mygost/internal/metrics"
+	"mygost/internal/probe"
 	"mygost/internal/proc"
 	"mygost/internal/profiles"
 	"mygost/internal/settings"
@@ -25,12 +27,19 @@ func newTestApp(t *testing.T) *app {
 	if err != nil {
 		t.Fatal(err)
 	}
+	statsStore, err := metrics.LoadStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	return &app{
-		page: "main",
-		st:   st,
-		ps:   ps,
-		pm:   proc.NewManager(nil),
-		geoM: geo.NewManager(t.TempDir(), 8109),
+		page:  "main",
+		st:    st,
+		ps:    ps,
+		pm:    proc.NewManager(nil),
+		geoM:  geo.NewManager(t.TempDir(), 8109),
+		mc:    metrics.NewClient(""),
+		msp:   metrics.NewSpeed(5),
+		stats: statsStore,
 	}
 }
 
@@ -364,5 +373,130 @@ func TestRunningLabelAttached(t *testing.T) {
 	a := newTestApp(t)
 	if got := a.runningLabel("运行中 0:10"); got != "运行中 0:10" {
 		t.Errorf("managed label = %q", got)
+	}
+}
+
+// 测试入口在配置行内：选中行有「测试」，结果内联显示摘要。
+func TestProfileRowTestAffordance(t *testing.T) {
+	a := newTestApp(t)
+	a.binFound = true
+	if _, err := a.ps.Save(&profiles.Profile{
+		Name: "t", Kind: profiles.KindProxy, Listen: ":8027", Proto: "http",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	id := a.ps.Items()[0].ID
+	a.st.Update(func(s *settings.Settings) { s.Current = id })
+
+	tt := ui.NewTester(a.view, 430, 900)
+	// 行内不再有「测试」按钮（收进了 ⋯ 菜单）
+	if tt.HasText(tr("测试", "Test")) {
+		t.Errorf("row should not show an inline test button, texts %q", tt.Texts())
+	}
+	// 主界面也不再有独立的测试/统计卡片
+	if tt.HasText(tr("连接测试", "Connectivity")) || tt.HasText(tr("流量统计", "Traffic stats")) {
+		t.Errorf("standalone cards should be gone, texts %q", tt.Texts())
+	}
+	// 菜单里提供「测试连接」：点开 ⋯ 后应出现
+	if err := tt.Click("⋯"); err == nil {
+		found := false
+		for _, m := range tt.Menu() {
+			if m == tr("测试连接", "Test connection") {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("menu should offer test action, items %v", tt.Menu())
+		}
+		tt.CloseMenu()
+	}
+
+	// 全部通过：列出每项名称与延迟（不能只给计数）
+	a.testResByID = map[string][]probe.Result{id: {
+		{Name: "代理链路", OK: true, Latency: 120 * time.Millisecond},
+		{Name: "上游隧道", OK: true, Latency: 42 * time.Millisecond},
+		{Name: "直连基线", OK: true, Latency: 88 * time.Millisecond},
+	}}
+	ttOK := ui.NewTester(a.view, 430, 900)
+	if !ttOK.HasText("代理链路 120ms · 上游隧道 42ms · 直连基线 88ms") {
+		t.Errorf("pass details missing, texts %q", ttOK.Texts())
+	}
+
+	// 单项失败时直接显示该项信息
+	a.testResByID = map[string][]probe.Result{id: {
+		{Name: "代理链路", OK: true, Latency: 120 * time.Millisecond},
+		{Name: "直连基线", OK: false, Detail: "超时"},
+	}}
+	tt2 := ui.NewTester(a.view, 430, 900)
+	if !tt2.HasText("直连基线 超时") {
+		t.Errorf("inline result missing, texts %q", tt2.Texts())
+	}
+
+	// 多项失败时才带计数前缀
+	a.testResByID = map[string][]probe.Result{id: {
+		{Name: "代理链路", OK: false, Detail: "连接被拒绝"},
+		{Name: "上游隧道", OK: false, Detail: "超时"},
+	}}
+	tt3 := ui.NewTester(a.view, 430, 900)
+	if !tt3.HasText("2 项失败 · 代理链路 连接被拒绝") {
+		t.Errorf("multi-failure summary missing, texts %q", tt3.Texts())
+	}
+}
+
+// 速率只在运行中显示；历史流量在设置页。
+func TestRateAndStatsPlacement(t *testing.T) {
+	a := newTestApp(t)
+	a.binFound = true
+	if _, err := a.ps.Save(&profiles.Profile{
+		Name: "t", Kind: profiles.KindProxy, Listen: ":8027", Proto: "http",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	a.st.Update(func(s *settings.Settings) { s.Current = a.ps.Items()[0].ID })
+
+	tt := ui.NewTester(a.view, 430, 900)
+	if tt.HasText("↑") {
+		t.Errorf("rate should hide when disconnected, texts %q", tt.Texts())
+	}
+
+	// 设置页显示历史流量
+	a.stats.Add(todayKey(), 1024*1024, 2*1024*1024, 10)
+	a.page = "settings"
+	tt2 := ui.NewTester(a.view, 430, 900)
+	if !tt2.HasText(tr("今日流量", "Today")) {
+		t.Errorf("settings should show history, texts %q", tt2.Texts())
+	}
+}
+
+// splitTargetList 解析多目标。
+func TestSplitTargetList(t *testing.T) {
+	got := splitTargetList("a:1\nb:2, c:3\n\n")
+	want := []string{"a:1", "b:2", "c:3"}
+	if len(got) != len(want) {
+		t.Fatalf("got %v", got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("got %v, want %v", got, want)
+		}
+	}
+}
+
+// 累加逻辑：两次采样之间的增量写入当天统计，计数器回退时不写负数。
+func TestAccumulate(t *testing.T) {
+	a := newTestApp(t)
+	now := time.Now()
+	a.accumulate(metrics.Snapshot{Input: 100, Output: 200, At: now})
+	if a.stats.Today().Up != 0 {
+		t.Error("first sample only sets baseline")
+	}
+	a.accumulate(metrics.Snapshot{Input: 1100, Output: 2200, At: now.Add(time.Second)})
+	if got := a.stats.Today(); got.Up != 1000 || got.Down != 2000 {
+		t.Errorf("accumulated = %+v", got)
+	}
+	// 计数器归零（gost 重启）
+	a.accumulate(metrics.Snapshot{Input: 5, Output: 5, At: now.Add(2 * time.Second)})
+	if got := a.stats.Today(); got.Up != 1000 {
+		t.Errorf("reset should not add negative: %+v", got)
 	}
 }

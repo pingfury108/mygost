@@ -197,3 +197,33 @@ func TestBuildYAMLSplitDisabled(t *testing.T) {
 		t.Errorf("split disabled but bypasses present:\n%s", y)
 	}
 }
+
+// metrics 段：无论是否分流都应写入。
+func TestBuildYAMLIncludesMetrics(t *testing.T) {
+	p := &Profile{Kind: KindProxy, Listen: ":8026", Proto: "http"}
+	y, err := p.BuildYAMLSplit(SplitConfig{MetricsAddr: "127.0.0.1:9100"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(y), `metrics:
+  addr: "127.0.0.1:9100"`) {
+		t.Errorf("metrics missing:\n%s", y)
+	}
+
+	// 空地址不写入
+	y2, _ := p.BuildYAMLSplit(SplitConfig{})
+	if strings.Contains(string(y2), "metrics:") {
+		t.Errorf("metrics should be omitted when addr empty:\n%s", y2)
+	}
+
+	// 分流开启时 metrics 与 bypasses 并存
+	y3, _ := p.BuildYAMLSplit(SplitConfig{
+		Enabled: true, PluginAddr: "127.0.0.1:8100",
+		PrivateMatchers: []string{"10.0.0.0/8"},
+		MetricsAddr:     "127.0.0.1:9100",
+	})
+	s3 := string(y3)
+	if !strings.Contains(s3, "bypasses:") || !strings.Contains(s3, "metrics:") {
+		t.Errorf("split + metrics should coexist:\n%s", s3)
+	}
+}

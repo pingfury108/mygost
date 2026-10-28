@@ -15,6 +15,8 @@ import (
 	"github.com/egoist/mygo/ui/editor"
 	"mygost/internal/geo"
 	"mygost/internal/gostbin"
+	"mygost/internal/metrics"
+	"mygost/internal/probe"
 	"mygost/internal/proc"
 	"mygost/internal/profiles"
 	"mygost/internal/settings"
@@ -28,6 +30,8 @@ type app struct {
 	loc  *gostbin.Locator
 	pm   *proc.Manager
 	geoM *geo.Manager
+	mc   *metrics.Client
+	msp  *metrics.Speed
 	tray *mygo.Tray
 
 	// 页面导航（窄窗口：主界面 + 推入式子页）
@@ -64,6 +68,17 @@ type app struct {
 
 	// 设置页保存反馈（短时提示）
 	savedUntil time.Time
+
+	// 连接测试与流量统计
+	testing     bool                      // 正在测试连通性
+	testResByID map[string][]probe.Result // 各配置的测试结果（内联显示）
+	metricsOK   bool                      // 是否成功抓到数据
+	rates       metrics.Rates             // 最近一次速率
+	metricsPort int                       // gost metrics 端口（0=未启用）
+	stats       *metrics.Store            // 按天流量统计
+	statsSaved  time.Time                 // 上次落盘时间
+	sessBase    metrics.Snapshot          // 会话基准（累加增量的起点）
+	hasSessBase bool
 
 	// 待展示的 toast（视图构建时 flush 到窗口）
 	pendingToasts []ui.Toast
@@ -187,8 +202,15 @@ func newApp() *app {
 		ps:        ps,
 		loc:       &gostbin.Locator{Dir: filepath.Join(dataDir, "bin")},
 		geoM:      geo.NewManager(filepath.Join(dataDir, "geo"), geo.DefaultListenPort),
+		mc:        metrics.NewClient(""),
+		msp:       metrics.NewSpeed(5),
 	}
 	a.pm = proc.NewManager(a.onProcEvent)
+	statsStore, err := metrics.LoadStore(dataDir)
+	if err != nil {
+		log.Printf("读取流量统计失败: %v", err)
+	}
+	a.stats = statsStore
 	return a
 }
 

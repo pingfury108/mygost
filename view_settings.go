@@ -8,6 +8,7 @@ import (
 
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/ui"
+	"mygost/internal/metrics"
 	"mygost/internal/proc"
 	"mygost/internal/settings"
 )
@@ -126,6 +127,11 @@ func (a *app) viewSettings(c *ui.Context) {
 					sectionTitle(c, "关于")
 					kvRow(c, "应用", "mygost 0.1.0 · gost 桌面客户端")
 					kvRow(c, "数据目录", dataDir)
+					if a.stats != nil {
+						tod, tot := a.stats.Today(), a.stats.Total()
+						kvRow(c, "今日流量", metrics.FormatBytes(tod.Up)+" ↑ / "+metrics.FormatBytes(tod.Down)+" ↓")
+						kvRow(c, "近 31 天", metrics.FormatBytes(tot.Up)+" ↑ / "+metrics.FormatBytes(tot.Down)+" ↓")
+					}
 				})
 			})
 

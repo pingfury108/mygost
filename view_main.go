@@ -14,6 +14,7 @@ import (
 	"github.com/egoist/mygo/ui"
 	"mygost/internal/geo"
 	"mygost/internal/gostbin"
+	"mygost/internal/metrics"
 	"mygost/internal/proc"
 	"mygost/internal/profiles"
 	"mygost/internal/settings"
@@ -78,6 +79,16 @@ func (a *app) viewDashboard(c *ui.Context) {
 					go a.toggleMain(runningID)
 				}
 			})
+
+			// 实时速率：仅在运行中且有数据时渲染（未连接时不显示 0）
+			if running && a.metricsOK {
+				ui.Row(c).Gap(sp3).Children(func() {
+					ui.Text(c, "↑ "+metrics.FormatRate(a.rates.Up)).
+						FontSize(fsCaption).TextColor(t.TextMuted)
+					ui.Text(c, "↓ "+metrics.FormatRate(a.rates.Down)).
+						FontSize(fsCaption).TextColor(t.TextMuted)
+				})
+			}
 		})
 
 		// ── gost 未安装横条 ──
@@ -160,7 +171,7 @@ func (a *app) profileRow(c *ui.Context, p *profiles.Profile, isCurrent, isRunnin
 			if isCurrent {
 				ui.Box(c).Width(3).Height(34).Radius(1.5).Background(t.Accent)
 			}
-			// 名称与摘要
+			// 名称与摘要（选中行有测试结果时，摘要行临时换成结果）
 			ui.Column(c).Grow(1).Gap(2).Children(func() {
 				ui.Row(c).Gap(sp2).AlignItems(ui.Center).Children(func() {
 					ui.Text(c, p.Name).FontSize(fsEmphasis)
@@ -169,12 +180,22 @@ func (a *app) profileRow(c *ui.Context, p *profiles.Profile, isCurrent, isRunnin
 					}
 					ui.Text(c, profiles.KindLabel(p.Kind)).FontSize(fsCaption).TextColor(t.TextMuted)
 				})
-				ui.Text(c, p.Summary()).FontSize(fsBody).TextColor(t.TextMuted).SingleLine()
+				if res, ok := a.testResultOf(p.ID); ok {
+					a.inlineTestResult(c, res)
+				} else {
+					ui.Text(c, p.Summary()).FontSize(fsBody).TextColor(t.TextMuted).SingleLine()
+				}
 			})
 
 			// 右侧：菜单
 			menu := iconButton(c, "⋯")
 			menu.Menu(func(m *ui.Menu) {
+				if a.testing {
+					m.Item(tr("测试中…", "Testing…")).Disabled(true)
+				} else if m.Item(tr("测试连接", "Test connection")).Chosen() {
+					go a.testProfile(p.ID)
+				}
+				m.Separator()
 				if m.Item("编辑").Chosen() {
 					a.startEdit(p)
 				}
@@ -191,6 +212,10 @@ func (a *app) profileRow(c *ui.Context, p *profiles.Profile, isCurrent, isRunnin
 		a.update(func(s *settings.Settings) { s.Current = id })
 	}
 	row.ContextMenu(func(m *ui.Menu) {
+		if m.Item(tr("测试连接", "Test connection")).Chosen() {
+			go a.testProfile(p.ID)
+		}
+		m.Separator()
 		if m.Item("编辑").Chosen() {
 			a.startEdit(p)
 		}
@@ -287,11 +312,21 @@ func (a *app) doStart() {
 		}
 	}
 
+	// 选一个可用的 metrics 端口（用于流量统计），失败则不启用统计
+	metricsPort, portErr := metrics.PickPort(9100, 10)
+	metricsAddr := ""
+	if portErr == nil {
+		metricsAddr = "127.0.0.1:" + strconv.Itoa(metricsPort)
+	}
+
 	// 运行前按当前分流开关重写 yml（保存时的开关可能已变）
 	if p := a.ps.Get(id); p != nil {
-		sc := profiles.SplitConfig{Enabled: s.Split, PluginAddr: a.geoM.Addr(), PrivateMatchers: geo.PrivateMatchers}
+		sc := profiles.SplitConfig{
+			Enabled: s.Split, PluginAddr: a.geoM.Addr(),
+			PrivateMatchers: geo.PrivateMatchers, MetricsAddr: metricsAddr,
+		}
 		if _, err := a.ps.SaveSplit(p, sc); err != nil {
-			a.toast("生成配置失败: "+err.Error(), "error")
+			a.toast(tr("生成配置失败: ", "Failed to build config: ")+err.Error(), "error")
 			return
 		}
 	}
@@ -311,6 +346,9 @@ func (a *app) doStart() {
 		return
 	}
 	a.recordPid(id, bin, yml)
+	if metricsAddr != "" {
+		a.startMetrics(metricsPort)
+	}
 	a.toast(tr("已连接", "Connected"), "success")
 }
 
@@ -409,6 +447,7 @@ func (a *app) stopGost() {
 		return
 	}
 	a.clearPid()
+	a.stopMetrics()
 }
 
 // ensureGeo 确保分流插件运行且规则就绪；规则缺失时自动下载。

@@ -65,6 +65,14 @@ type SplitConfig struct {
 	PluginAddr string
 	// PrivateMatchers 是始终直连的私网段。
 	PrivateMatchers []string
+	// MetricsAddr 非空时给 gost 打开 Prometheus 端点（如 127.0.0.1:9100）。
+	MetricsAddr string
+}
+
+// appendMetrics 在配置末尾追加 metrics 段（统计流量与连接）。
+func appendMetrics(y []byte, addr string) []byte {
+	s := strings.TrimRight(string(y), "\n")
+	return []byte(s + "\nmetrics:\n  addr: \"" + addr + "\"\n")
 }
 
 // NoSplit 是未启用分流时的默认参数。
@@ -78,8 +86,14 @@ var NoSplit = SplitConfig{}
 //   - split-geo：白名单模式的 geo 插件（解析域名命中国内 IP → 允许直连）
 func (p *Profile) BuildYAMLSplit(sc SplitConfig) ([]byte, error) {
 	y, err := p.BuildYAML()
-	if err != nil || !sc.Enabled || p.Kind != KindProxy {
+	if err != nil {
 		return y, err
+	}
+	if sc.MetricsAddr != "" {
+		y = appendMetrics(y, sc.MetricsAddr)
+	}
+	if !sc.Enabled || p.Kind != KindProxy {
+		return y, nil
 	}
 	s := string(y)
 	// bypass 插在 hop 名字行之后（属于该 hop 的键），而不是名字行之前
