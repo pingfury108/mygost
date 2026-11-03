@@ -31,10 +31,12 @@ func TestSplitE2E(t *testing.T) {
 	if err != nil {
 		t.Skipf("offline: %v", err)
 	}
-	t.Logf("ip entries: %d", n)
-	if err := m.InstallFromPath(plug); err != nil {
-		t.Fatal(err)
+	dn, err := m.UpdateDomainList(context.Background(), geo.DefaultDomainListURL)
+	if err != nil {
+		t.Skipf("domain list offline: %v", err)
 	}
+	t.Logf("lists: %d IP, %d domains", n, dn)
+	_ = plug
 	ctx := context.Background()
 	if err := m.Start(ctx); err != nil {
 		t.Fatal(err)

@@ -450,6 +450,48 @@ func (a *app) stopGost() {
 	}
 	a.clearPid()
 	a.stopMetrics()
+	// 插件跟随 gost：gost 停了就不再需要它
+	a.geoM.Stop()
+}
+
+// watchSplit 守护插件与 gost 的绑定关系：
+// gost 在运行且分流开启时，插件必须在运行；不在就自动补启。
+//
+// 这样无论插件是被 app 退出、崩溃还是被手动 kill 掉的，都会自愈。
+func (a *app) watchSplit() {
+	go func() {
+		t := time.NewTicker(5 * time.Second)
+		defer t.Stop()
+		for range t.C {
+			if a.win == nil || a.win.IsDestroyed() {
+				return
+			}
+			if st, _, _ := a.pm.State(); st != proc.Running {
+				continue
+			}
+			if !a.st.Get().Split {
+				continue
+			}
+			if a.geoM.Running() && portOpen(a.geoM.Addr()) {
+				continue
+			}
+			log.Printf("分流插件未运行，自动补启")
+			if err := a.ensureGeo(); err != nil {
+				log.Printf("补启分流插件失败: %v", err)
+			}
+			a.win.Update(func() { a.refreshTray() })
+		}
+	}()
+}
+
+// portOpen 报告 addr 是否可连（判断插件是否真的在工作）。
+func portOpen(addr string) bool {
+	c, err := net.DialTimeout("tcp", addr, 400*time.Millisecond)
+	if err != nil {
+		return false
+	}
+	c.Close()
+	return true
 }
 
 // ensureGeo 确保分流插件运行且规则就绪；规则缺失时自动下载。
@@ -457,9 +499,15 @@ func (a *app) ensureGeo() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	if !a.geoM.ListReady() {
-		if _, err := a.geoM.UpdateIPList(ctx, a.st.Get().SplitIPListURL); err != nil {
+	st := a.st.Get()
+	if a.geoM.CountIP() <= 0 {
+		if _, err := a.geoM.UpdateIPList(ctx, st.SplitIPListURL); err != nil {
 			return fmt.Errorf("更新 IP 列表失败: %w", err)
+		}
+	}
+	if a.geoM.CountDomains() <= 0 {
+		if _, err := a.geoM.UpdateDomainList(ctx, st.SplitDomainListURL); err != nil {
+			return fmt.Errorf("更新域名列表失败: %w", err)
 		}
 	}
 	if a.geoM.Running() {

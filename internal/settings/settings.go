@@ -24,6 +24,10 @@ type Settings struct {
 	Split bool `json:"split"`
 	// SplitIPListURL 是国内 IP 列表下载地址，空用内置默认。
 	SplitIPListURL string `json:"splitIPListURL,omitempty"`
+	// SplitDomainListURL 是国内域名列表下载地址，空用内置默认。
+	SplitDomainListURL string `json:"splitDomainListURL,omitempty"`
+	// SplitPolicy 是未收录域名的策略：proxy（默认）/ resolve。
+	SplitPolicy string `json:"splitPolicy,omitempty"`
 	// RequestLog 开启 gost debug 日志，记录每个请求的去向（直连/代理）。
 	RequestLog bool `json:"requestLog,omitempty"`
 }

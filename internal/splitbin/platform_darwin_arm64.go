@@ -1,8 +1,8 @@
 //go:build darwin && arm64
 
-package geobin
+package splitbin
 
 import _ "embed"
 
-//go:embed gost-geo-plugin_darwin_arm64
+//go:embed splitd_darwin_arm64
 var platformPlugin []byte

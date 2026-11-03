@@ -8,3 +8,6 @@ mygo_windows_*.syso
 
 # 构建期生成的 gost 二进制（./tools/fetch-deps.sh 生成）
 /internal/gostbin/gost_*
+
+# 构建期生成的分流插件
+/internal/splitbin/splitd_*

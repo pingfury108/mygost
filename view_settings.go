@@ -8,6 +8,7 @@ import (
 
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/ui"
+	"mygost/internal/geo"
 	"mygost/internal/metrics"
 	"mygost/internal/proc"
 	"mygost/internal/settings"
@@ -96,21 +97,38 @@ func (a *app) viewSettings(c *ui.Context) {
 				ui.Column(c).FillWidth().Gap(sp3).Children(func() {
 					sectionTitle(c, tr("分流", "Routing"))
 					settingRow(c, tr("国内直连", "Direct for CN"),
-						tr("命中国内 IP 的目标直接连接，其余走隧道",
-							"CN IP targets connect directly, others via tunnel"), func() {
+						tr("国内域名与 IP 直接连接，其余走隧道",
+							"CN domains and IPs connect directly, others via tunnel"), func() {
 							if ui.Switch(c, &a.sSplit).Changed() {
 								a.onSplitToggled()
 							}
 						})
 					if a.sSplit {
 						ui.Divider(c)
-						settingRow(c, tr("IP 列表", "IP List"), a.ipListDesc(), func() {
+						// 插件状态持久可见：分流是否真的在工作
+						a.splitStatusRow(c)
+						ui.Divider(c)
+						settingRow(c, tr("域名列表", "Domains"), a.domainListDesc(), func() {
 							if a.splitBusy {
 								ui.Spinner(c)
 							} else {
-								ui.Button(c, tr("立即更新", "Update")).OnClick(func() { go a.updateIPList() })
+								ui.Button(c, tr("更新", "Update")).OnClick(func() { go a.updateSplitLists() })
 							}
 						})
+						ui.Divider(c)
+						settingRow(c, tr("IP 列表", "IP list"), a.ipListDesc(), nil)
+						ui.Divider(c)
+						settingField(c, tr("未收录域名", "Unknown domains"),
+							tr("列表外的域名：走代理更严格；按 IP 判断会让国内小站直连",
+								"Unlisted: proxy is strict; by-IP lets CN sites connect directly"),
+							func() {
+								if ui.Segmented(c, &a.sSplitPolicy,
+									tr("走代理", "Proxy"), tr("按 IP 判断", "By IP")).Changed() {
+									a.saveSettings()
+									a.geoM.SetPolicy(policyOf(a.sSplitPolicy))
+									a.reconnectIfRunning()
+								}
+							})
 					}
 				})
 			})
@@ -190,6 +208,10 @@ func (a *app) saveSettings() {
 		s.AutoStart = a.sAuto
 		s.Split = a.sSplit
 		s.SplitIPListURL = a.sSplitURL
+		s.SplitPolicy = "proxy"
+		if a.sSplitPolicy == 1 {
+			s.SplitPolicy = "resolve"
+		}
 		s.RequestLog = a.sReqLog
 	})
 	a.savedUntil = time.Now().Add(2 * time.Second)
@@ -209,42 +231,84 @@ func (a *app) saveAndCheck() {
 	a.checkBinAsync()
 }
 
-// ipListDesc 是 IP 列表行的描述文字。
-func (a *app) ipListDesc() string {
+// listDesc 描述一份规则列表的状态。
+func (a *app) listDesc(count int, at time.Time) string {
 	if a.splitBusy {
 		return tr("更新中…", "Updating…")
 	}
-	n := a.geoM.CountLines()
-	if n < 0 {
+	if count < 0 {
 		return tr("尚未下载", "Not downloaded")
 	}
-	at := a.geoM.UpdateAt().Format("2006-01-02 15:04")
-	return fmt.Sprintf("%d 条 · %s", n, at)
+	if at.IsZero() {
+		return fmt.Sprintf(tr("%d 条", "%d entries"), count)
+	}
+	return fmt.Sprintf("%d 条 · %s", count, at.Format("2006-01-02 15:04"))
+}
+
+// ipListDesc 是 IP 列表行的描述文字。
+func (a *app) ipListDesc() string {
+	return a.listDesc(a.geoM.CountIP(), a.geoM.UpdateAt(a.geoM.IPListPath()))
+}
+
+// domainListDesc 是域名列表行的描述文字。
+func (a *app) domainListDesc() string {
+	return a.listDesc(a.geoM.CountDomains(), a.geoM.UpdateAt(a.geoM.DomainListPath()))
 }
 
 // onSplitToggled 在开关变化时落盘；开启即预下载规则，保证下次连接可用。
+//
+// 分流开关只在生成配置时生效，所以运行中改动必须重连才有意义：
+// 这里自动重连，避免用户以为设置没起作用。
 func (a *app) onSplitToggled() {
 	a.saveSettings()
-	if a.sSplit && !a.geoM.ListReady() && !a.splitBusy {
-		go a.updateIPList()
+	if a.sSplit && !a.geoM.Ready() && !a.splitBusy {
+		go a.updateSplitLists()
 	}
+	a.reconnectIfRunning()
 }
 
-// updateIPList 在后台更新国内 IP 列表。
-func (a *app) updateIPList() {
+// reconnectIfRunning 在 gost 运行中时重连，使新配置生效。
+func (a *app) reconnectIfRunning() {
+	if st, _, _ := a.pm.State(); st != proc.Running {
+		return
+	}
+	a.toast(tr("正在重新连接以应用设置", "Reconnecting to apply settings"), "success")
+	go func() {
+		a.stopGost()
+		time.Sleep(400 * time.Millisecond)
+		a.doStart()
+	}()
+}
+
+// updateSplitLists 在后台更新两份列表（IP 与域名）。
+func (a *app) updateSplitLists() {
+	if a.splitBusy {
+		return
+	}
 	a.win.Update(func() { a.splitBusy = true })
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
-	n, err := a.geoM.UpdateIPList(ctx, a.sSplitURL)
+	st := a.st.Get()
+
+	ips, ipErr := a.geoM.UpdateIPList(ctx, st.SplitIPListURL)
+	domains, domErr := a.geoM.UpdateDomainList(ctx, st.SplitDomainListURL)
+
 	a.win.Update(func() {
 		a.splitBusy = false
-		if err != nil {
+		switch {
+		case ipErr != nil:
 			a.pendingToasts = append(a.pendingToasts,
-				ui.Toast{Title: tr("更新失败: ", "Update failed: ") + err.Error(), Type: "error"})
-			return
+				ui.Toast{Title: tr("IP 列表更新失败: ", "IP list: ") + ipErr.Error(), Type: "error"})
+		case domErr != nil:
+			a.pendingToasts = append(a.pendingToasts,
+				ui.Toast{Title: tr("域名列表更新失败: ", "Domain list: ") + domErr.Error(), Type: "error"})
+		default:
+			a.pendingToasts = append(a.pendingToasts, ui.Toast{
+				Title: fmt.Sprintf(tr("已更新 %d 条 IP、%d 个域名", "Updated %d IPs, %d domains"), ips, domains),
+				Type:  "success",
+			})
 		}
-		a.pendingToasts = append(a.pendingToasts,
-			ui.Toast{Title: fmt.Sprintf(tr("已更新 %d 条", "Updated %d entries"), n), Type: "success"})
 	})
 }
 
@@ -279,7 +343,49 @@ func (a *app) killLeftovers() {
 		}
 	}
 	a.win.Update(func() {
+		if n == 0 {
+			a.pendingToasts = append(a.pendingToasts,
+				ui.Toast{Title: tr("没有可结束的进程", "Nothing to kill"), Type: "success"})
+			return
+		}
 		a.pendingToasts = append(a.pendingToasts,
 			ui.Toast{Title: fmt.Sprintf(tr("已结束 %d 个进程", "Killed %d process(es)"), n), Type: "success"})
+	})
+}
+
+// policyOf 把界面索引转成插件策略。
+func policyOf(idx int) geo.Policy {
+	if idx == 1 {
+		return geo.PolicyResolve
+	}
+	return geo.PolicyProxy
+}
+
+// splitStatusRow 显示分流插件的实时状态。
+func (a *app) splitStatusRow(c *ui.Context) {
+	t := c.Theme()
+	runningGost := false
+	if st, _, _ := a.pm.State(); st == proc.Running {
+		runningGost = true
+	}
+	alive := a.geoM.Running() && portOpen(a.geoM.Addr())
+
+	dot, text := t.TextMuted, tr("未运行", "Not running")
+	switch {
+	case alive:
+		dot, text = t.Success, tr("插件运行中", "Plugin running")
+	case runningGost:
+		// gost 在跑但插件不在 = 分流实际未生效，必须警告
+		dot, text = t.Danger, tr("插件未运行，分流未生效（将被自动重启）",
+			"Plugin down — routing inactive (auto-restarting)")
+	case a.geoM.Ready():
+		dot, text = t.TextMuted, tr("连接后启动", "Starts with connection")
+	default:
+		dot, text = t.Warning, tr("规则未下载", "Rules not downloaded")
+	}
+
+	ui.Row(c).AlignItems(ui.Center).Gap(sp2).Padding(sp1, 0).Children(func() {
+		statusDot(c, dot, dotSm)
+		ui.Text(c, text).FontSize(fsCaption).TextColor(t.TextMuted).Grow(1)
 	})
 }

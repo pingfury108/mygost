@@ -94,15 +94,16 @@ type app struct {
 	delTarget string
 
 	// 设置页表单
-	sGostPath string
-	sMirror   string
-	sKeep     bool
-	sAuto     bool
-	sLogin    bool
-	sSplit    bool
-	sSplitURL string
-	sReqLog   bool
-	splitBusy bool // 分流列表更新中
+	sGostPath    string
+	sMirror      string
+	sKeep        bool
+	sAuto        bool
+	sLogin       bool
+	sSplit       bool
+	sSplitURL    string
+	sSplitPolicy int // 0=未收录域名走代理 1=按 IP 判断
+	sReqLog      bool
+	splitBusy    bool // 分流列表更新中
 
 	saveTimer *time.Timer // 文本输入防抖，停顿后才落盘
 }
@@ -138,6 +139,9 @@ func main() {
 		a.sLogin = mygo.App.OpenAtLogin()
 		a.sSplit = s.Split
 		a.sSplitURL = s.SplitIPListURL
+		if s.SplitPolicy == "resolve" {
+			a.sSplitPolicy = 1
+		}
 		a.sReqLog = s.RequestLog
 		a.win = mygo.NewWindow(mygo.WindowOptions{
 			Title:     "mygost",
@@ -168,6 +172,11 @@ func main() {
 		a.setupTray()
 		a.refreshTray()
 		a.setupAppMenu()
+		// 接管了上次遗留的 gost？把它的分流插件一并恢复
+		if st, _, _ := a.pm.State(); st == proc.Running && a.st.Get().Split {
+			go a.ensureGeo()
+		}
+		a.watchSplit()
 		a.checkBinAsync()
 		if s.AutoStart && s.Current != "" {
 			go a.doStart()
@@ -175,10 +184,13 @@ func main() {
 	})
 	mygo.App.OnBeforeQuit(func(e *mygo.QuitEvent) {
 		a.quitting = true // 放行 OnClose 的窗口隐藏拦截
+		// 插件跟随 gost：gost 保留时插件也必须保留，
+		// 否则 gost 的 split-geo 会指向一个无人监听的端口，
+		// 白名单模式下降级为"全部走代理"。
 		if !a.st.Get().KeepOnExit {
 			a.pm.StopAndWait(3 * time.Second)
+			a.geoM.Stop()
 		}
-		a.geoM.Stop()
 	})
 	if err := mygo.App.Run(); err != nil {
 		log.Fatal(err)

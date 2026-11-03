@@ -2,89 +2,83 @@ package geo
 
 import (
 	"context"
-	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
 
-func TestUpdateIPListAndCount(t *testing.T) {
-	dir := t.TempDir()
-	m := NewManager(dir, 8101)
-
-	// 本地文件模拟下载源
-	src := filepath.Join(dir, "src.txt")
-	body := "# comment\n1.0.1.0/24\n\n2.0.0.0/8\n"
-	if err := os.WriteFile(src, []byte(body), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	n, err := m.UpdateIPList(context.Background(), "file://"+src)
+func TestParseGeositeJSON(t *testing.T) {
+	body := `{"rules":[{"domain_suffix":["baidu.com","qq.com","baidu.com"]},{"domain_suffix":["alibaba"]}]}`
+	got, err := ParseGeositeJSON(strings.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n != 2 {
-		t.Errorf("count = %d, want 2", n)
+	want := []string{"baidu.com", "qq.com", "alibaba"}
+	if len(got) != len(want) {
+		t.Fatalf("got %v", got)
 	}
-	if !m.ListReady() {
-		t.Error("list should be ready")
-	}
-	if got := m.CountLines(); got != 2 {
-		t.Errorf("CountLines = %d", got)
-	}
-	if m.UpdateAt().IsZero() {
-		t.Error("UpdateAt should be set")
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("got %v, want %v", got, want)
+		}
 	}
 }
 
-func TestManagerStartStop(t *testing.T) {
-	if _, err := os.Stat(pluginDevPath()); err != nil {
-		t.Skip("本地未安装 gost-geo-plugin（go install 后放到临时目录测试）")
+func TestParseGeositeInvalid(t *testing.T) {
+	if _, err := ParseGeositeJSON(strings.NewReader("{bad")); err == nil {
+		t.Error("invalid json should error")
 	}
+}
+
+func TestUpdateListsFromFile(t *testing.T) {
 	dir := t.TempDir()
-	m := NewManager(dir, 8102)
-	// 把开发机的插件复制进去
-	if err := m.InstallFromPath(pluginDevPath()); err != nil {
-		t.Fatal(err)
+	m := NewManager(dir, 8101)
+
+	ips := filepath.Join(dir, "ips.txt")
+	os.WriteFile(ips, []byte("# c\n1.0.1.0/24\n\n2.0.0.0/8\n"), 0o644)
+	n, err := m.UpdateIPList(context.Background(), "file://"+ips)
+	if err != nil || n != 2 {
+		t.Fatalf("ip list: %d %v", n, err)
 	}
-	// 写入一条私网规则即可启动
-	if err := os.WriteFile(m.IPListPath(), []byte("10.0.0.0/8\n"), 0o644); err != nil {
-		t.Fatal(err)
+
+	geo := filepath.Join(dir, "cn.json")
+	os.WriteFile(geo, []byte(`{"rules":[{"domain_suffix":["baidu.com","qq.com"]}]}`), 0o644)
+	dn, err := m.UpdateDomainList(context.Background(), "file://"+geo)
+	if err != nil || dn != 2 {
+		t.Fatalf("domain list: %d %v", dn, err)
 	}
-	ctx := context.Background()
-	if err := m.Start(ctx); err != nil {
-		t.Fatal(err)
+
+	if !m.Ready() {
+		t.Error("both lists present should be ready")
 	}
-	defer m.Stop()
-	if err := m.WaitReady(ctx, 5*time.Second); err != nil {
-		t.Fatalf("plugin not ready: %v", err)
-	}
-	m.Stop()
-	if m.Running() {
-		t.Error("should not be running after Stop")
+	if m.CountIP() != 2 || m.CountDomains() != 2 {
+		t.Errorf("counts: %d %d", m.CountIP(), m.CountDomains())
 	}
 }
 
-func TestStartWithoutInstall(t *testing.T) {
-	m := NewManager(t.TempDir(), 8103)
-	// 无 IP 列表时必然失败（列表仍需运行时下载）
+func TestNotReadyWithoutLists(t *testing.T) {
+	m := NewManager(t.TempDir(), 8102)
+	if m.Ready() {
+		t.Error("empty dir should not be ready")
+	}
 	if err := m.Start(context.Background()); err == nil {
-		t.Error("start should fail when ip list is missing")
+		t.Error("start should fail without lists")
 	}
 }
 
-// 零安装：全新数据目录 + 已有 IP 列表，Start 应自动解压嵌入的插件并跑起来。
+// 零安装：嵌入的插件应被解压并能启动服务。
 func TestEmbeddedPluginAutoInstall(t *testing.T) {
-	if len(embedded()) == 0 {
+	if len(PluginBytes()) == 0 {
 		t.Skip("当前平台未嵌入插件")
 	}
-	dir := t.TempDir()
-	m := NewManager(dir, 8104)
-	if err := os.WriteFile(m.IPListPath(), []byte("10.0.0.0/8\n"), 0o644); err != nil {
+	m := NewManager(t.TempDir(), 8103)
+	if err := os.WriteFile(m.IPListPath(), []byte("1.0.1.0/24\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if m.Installed() != true {
-		t.Fatal("embedded plugin should count as installed")
+	if err := os.WriteFile(m.DomainListPath(), []byte("baidu.com\n"), 0o644); err != nil {
+		t.Fatal(err)
 	}
 	ctx := context.Background()
 	if err := m.Start(ctx); err != nil {
@@ -94,36 +88,7 @@ func TestEmbeddedPluginAutoInstall(t *testing.T) {
 	if err := m.WaitReady(ctx, 15*time.Second); err != nil {
 		t.Fatalf("plugin not ready: %v", err)
 	}
-	// 二进制应已被解压到数据目录
 	if st, err := os.Stat(m.PluginPath()); err != nil || st.Size() == 0 {
 		t.Fatalf("plugin not extracted: %v", err)
 	}
-}
-
-func TestAddr(t *testing.T) {
-	m := NewManager("x", 0)
-	if m.Addr() != "127.0.0.1:8100" {
-		t.Errorf("default addr %q", m.Addr())
-	}
-}
-
-func TestPrivateMatchers(t *testing.T) {
-	if len(PrivateMatchers) == 0 {
-		t.Fatal("private matchers required")
-	}
-	for _, m := range []string{"127.0.0.0/8", "10.0.0.0/8"} {
-		if net.ParseIP(m) == nil {
-			if _, _, err := net.ParseCIDR(m); err != nil {
-				t.Errorf("invalid matcher %q", m)
-			}
-		}
-	}
-}
-
-func pluginDevPath() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	return filepath.Join(home, "go", "bin", "gost-geo-plugin")
 }

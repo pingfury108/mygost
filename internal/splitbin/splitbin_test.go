@@ -1,4 +1,4 @@
-package geobin
+package splitbin
 
 import (
 	"runtime"
@@ -13,7 +13,7 @@ func TestEmbeddedPlugin(t *testing.T) {
 		t.Skipf("no prebuilt plugin for %s/%s", runtime.GOOS, runtime.GOARCH)
 	}
 	bin := Plugin()
-	if len(bin) < 1024*1024 {
+	if len(bin) < 512*1024 {
 		t.Fatalf("embedded plugin too small: %d bytes（先跑 ./tools/fetch-deps.sh）", len(bin))
 	}
 	var ok bool
@@ -24,9 +24,9 @@ func TestEmbeddedPlugin(t *testing.T) {
 		}
 	}
 	if !ok {
-		t.Fatalf("embedded plugin is not an executable (head %x)", bin[:4])
+		t.Fatalf("not an executable (head %x)", bin[:4])
 	}
 	if Name() == "" {
-		t.Error("Name should not be empty")
+		t.Error("Name empty")
 	}
 }

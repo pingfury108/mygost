@@ -2,6 +2,7 @@ package main
 
 import (
 	"net"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -545,5 +546,27 @@ func TestFeedRequest(t *testing.T) {
 	a.feedRequest(`{"msg":"route(retry=0) x.com:443","sid":"z1"}`)
 	if a.requestCount() != 1 {
 		t.Errorf("count = %d", a.requestCount())
+	}
+}
+
+// 插件状态行：gost 在跑但插件不在时必须显示警告（分流实际未生效）。
+func TestSplitStatusRow(t *testing.T) {
+	a := newTestApp(t)
+	a.page = "settings"
+	a.sSplit = true
+	a.st.Update(func(s *settings.Settings) { s.Split = true })
+
+	// 未连接、规则未下载
+	tt := ui.NewTester(a.view, 430, 1200)
+	if !tt.HasText(tr("规则未下载", "Rules not downloaded")) {
+		t.Errorf("should warn about missing rules, texts %q", tt.Texts())
+	}
+
+	// 规则就绪但未连接
+	os.WriteFile(a.geoM.IPListPath(), []byte("1.0.0.0/8\n"), 0o644)
+	os.WriteFile(a.geoM.DomainListPath(), []byte("baidu.com\n"), 0o644)
+	tt2 := ui.NewTester(a.view, 430, 1200)
+	if !tt2.HasText(tr("连接后启动", "Starts with connection")) {
+		t.Errorf("should say starts with connection, texts %q", tt2.Texts())
 	}
 }

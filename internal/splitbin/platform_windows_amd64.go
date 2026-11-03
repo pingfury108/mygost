@@ -1,8 +1,8 @@
 //go:build windows && amd64
 
-package geobin
+package splitbin
 
 import _ "embed"
 
-//go:embed gost-geo-plugin_windows_amd64.exe
+//go:embed splitd_windows_amd64.exe
 var platformPlugin []byte
