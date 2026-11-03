@@ -81,6 +81,13 @@ func (a *app) viewSettings(c *ui.Context) {
 							a.saveSettings()
 						}
 					})
+					divider(c)
+					settingRow(c, "记录请求明细", "记录每个请求是直连还是走代理（debug 日志，量较大）", func() {
+						if ui.Switch(c, &a.sReqLog).Changed() {
+							a.saveSettings()
+							a.toast(tr("重新连接后生效", "Takes effect on next connect"), "success")
+						}
+					})
 				})
 			})
 
@@ -183,6 +190,7 @@ func (a *app) saveSettings() {
 		s.AutoStart = a.sAuto
 		s.Split = a.sSplit
 		s.SplitIPListURL = a.sSplitURL
+		s.RequestLog = a.sReqLog
 	})
 	a.savedUntil = time.Now().Add(2 * time.Second)
 }

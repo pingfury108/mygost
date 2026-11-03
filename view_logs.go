@@ -10,6 +10,10 @@ import (
 
 // viewLogs 日志页：搜索、复制、跟随最新；破坏性操作收进菜单。
 func (a *app) viewLogs(c *ui.Context) {
+	if a.logView == 1 {
+		a.viewRequests(c)
+		return
+	}
 	t := c.Theme()
 	lines := a.pm.Lines(0)
 	shown := lines
@@ -31,6 +35,11 @@ func (a *app) viewLogs(c *ui.Context) {
 	}
 
 	ui.Column(c).Fill().Padding(sp4).Gap(sp3).Children(func() {
+		// 视图切换：原始日志 / 请求决策
+		ui.Segmented(c, &a.logView,
+			tr("原始日志", "Raw"), fmt.Sprintf(tr("请求 (%d)", "Requests (%d)"), a.requestCount())).
+			Label(tr("视图", "View"))
+
 		// 工具栏：搜索占满，其余为图标/次级按钮
 		ui.Row(c).FillWidth().Gap(sp2).AlignItems(ui.Center).Children(func() {
 			ui.TextInput(c, &a.logFilter).Grow(1).Placeholder("搜索日志…")

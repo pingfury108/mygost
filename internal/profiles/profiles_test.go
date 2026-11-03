@@ -166,15 +166,16 @@ func TestBuildYAMLSplitEnabled(t *testing.T) {
 	}
 	s := string(y)
 	for _, want := range []string{
-		"bypass: split-direct",
+		"bypasses:\n          - split-private",
 		"name: split-private",
 		"10.0.0.0/8",
 		"name: split-geo",
 		"whitelist: true",
 		"type: grpc",
 		"addr: 127.0.0.1:8100",
-		"name: split-direct",
 		"bypasses:",
+		"          - split-private",
+		"          - split-geo",
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("yaml missing %q:\n%s", want, s)
@@ -186,21 +187,42 @@ func TestBuildYAMLSplitEnabled(t *testing.T) {
 	}
 }
 
-// 分流关闭时不附加任何 bypasses。
-func TestBuildYAMLSplitDisabled(t *testing.T) {
-	p := &Profile{Kind: KindProxy, Listen: ":8026", Proto: "http"}
+// 分流关闭时：私网直连仍然必须存在（否则局域网走隧道），但没有 geo。
+func TestBuildYAMLSplitDisabledKeepsPrivate(t *testing.T) {
+	p := &Profile{Kind: KindProxy, Listen: ":8026", Proto: "http",
+		UpEnabled: true, UpProto: "sshd", UpAddr: "1.2.3.4:8081"}
 	y, err := p.BuildYAMLSplit(SplitConfig{Enabled: false, PluginAddr: "127.0.0.1:8100"})
 	if err != nil {
 		t.Fatal(err)
 	}
+	s := string(y)
+	if !strings.Contains(s, "split-private") || !strings.Contains(s, "192.168.0.0/16") {
+		t.Errorf("private bypass must exist even with split off:\n%s", s)
+	}
+	if strings.Contains(s, "split-geo") {
+		t.Errorf("geo bypass should be absent when split off:\n%s", s)
+	}
+	if !strings.Contains(s, "bypasses:\n          - split-private") {
+		t.Errorf("hop must reference the bypass group:\n%s", s)
+	}
+}
+
+// 没有上游时不挂 bypass（本机直连本就是默认行为）。
+func TestBuildYAMLNoUpstreamNoBypass(t *testing.T) {
+	p := &Profile{Kind: KindProxy, Listen: ":8026", Proto: "http"}
+	y, err := p.BuildYAMLSplit(SplitConfig{Enabled: true, PluginAddr: "127.0.0.1:8100"})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if strings.Contains(string(y), "bypasses:") {
-		t.Errorf("split disabled but bypasses present:\n%s", y)
+		t.Errorf("no chain means no bypass:\n%s", y)
 	}
 }
 
 // metrics 段：无论是否分流都应写入。
 func TestBuildYAMLIncludesMetrics(t *testing.T) {
-	p := &Profile{Kind: KindProxy, Listen: ":8026", Proto: "http"}
+	p := &Profile{Kind: KindProxy, Listen: ":8026", Proto: "http",
+		UpEnabled: true, UpProto: "sshd", UpAddr: "1.2.3.4:8081"}
 	y, err := p.BuildYAMLSplit(SplitConfig{MetricsAddr: "127.0.0.1:9100"})
 	if err != nil {
 		t.Fatal(err)
@@ -225,5 +247,22 @@ func TestBuildYAMLIncludesMetrics(t *testing.T) {
 	s3 := string(y3)
 	if !strings.Contains(s3, "bypasses:") || !strings.Contains(s3, "metrics:") {
 		t.Errorf("split + metrics should coexist:\n%s", s3)
+	}
+}
+
+// debug 日志级别：请求决策只在 debug 输出，请求视图依赖它。
+func TestBuildYAMLIncludesDebugLog(t *testing.T) {
+	p := &Profile{Kind: KindProxy, Listen: ":8026", Proto: "http"}
+	y, err := p.BuildYAMLSplit(SplitConfig{DebugLog: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(y), "log:\n  level: debug") {
+		t.Errorf("debug level missing:\n%s", y)
+	}
+
+	y2, _ := p.BuildYAMLSplit(SplitConfig{})
+	if strings.Contains(string(y2), "log:") {
+		t.Errorf("log section should be omitted by default:\n%s", y2)
 	}
 }

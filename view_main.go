@@ -324,6 +324,8 @@ func (a *app) doStart() {
 		sc := profiles.SplitConfig{
 			Enabled: s.Split, PluginAddr: a.geoM.Addr(),
 			PrivateMatchers: geo.PrivateMatchers, MetricsAddr: metricsAddr,
+			// 请求决策只有 debug 级日志才有；设置里可关闭以省开销
+			DebugLog: s.RequestLog,
 		}
 		if _, err := a.ps.SaveSplit(p, sc); err != nil {
 			a.toast(tr("生成配置失败: ", "Failed to build config: ")+err.Error(), "error")

@@ -14,6 +14,7 @@ import (
 	"mygost/internal/probe"
 	"mygost/internal/proc"
 	"mygost/internal/profiles"
+	"mygost/internal/reqlog"
 	"mygost/internal/settings"
 )
 
@@ -40,6 +41,7 @@ func newTestApp(t *testing.T) *app {
 		mc:    metrics.NewClient(""),
 		msp:   metrics.NewSpeed(5),
 		stats: statsStore,
+		reqs:  reqlog.New(50),
 	}
 }
 
@@ -498,5 +500,50 @@ func TestAccumulate(t *testing.T) {
 	a.accumulate(metrics.Snapshot{Input: 5, Output: 5, At: now.Add(2 * time.Second)})
 	if got := a.stats.Today(); got.Up != 1000 {
 		t.Errorf("reset should not add negative: %+v", got)
+	}
+}
+
+// 日志页两个视图：原始 / 请求；请求视图显示去向标签。
+func TestRequestView(t *testing.T) {
+	a := newTestApp(t)
+	a.page = "logs"
+
+	tt := ui.NewTester(a.view, 430, 900)
+	if !tt.HasText(tr("原始日志", "Raw")) {
+		t.Errorf("view switch missing, texts %q", tt.Texts())
+	}
+
+	// 切到请求视图，注入解析结果
+	a.logView = 1
+	a.reqs.Feed(`{"msg":"route(retry=0) 192.168.1.10:8080","sid":"a1"}`)
+	a.reqs.Feed(`{"msg":"route(retry=0) node-0@1.2.3.4:8081 > example.com:80","sid":"b1"}`)
+	a.reqs.Feed(`{"msg":"route(retry=0) dial tcp 1.2.3.4:8081: connect: connection refused","sid":"c1"}`)
+
+	tt2 := ui.NewTester(a.view, 430, 900)
+	texts := strings.Join(tt2.Texts(), "|")
+	for _, want := range []string{"192.168.1.10:8080", "example.com:80", tr("直连", "Direct"), tr("代理", "Proxy"), tr("失败", "Failed")} {
+		if !strings.Contains(texts, want) {
+			t.Errorf("request view missing %q: %q", want, texts)
+		}
+	}
+
+	// 仅失败过滤
+	a.reqOnlyFailed = true
+	tt3 := ui.NewTester(a.view, 430, 900)
+	t3 := strings.Join(tt3.Texts(), "|")
+	if strings.Contains(t3, "192.168.1.10:8080") {
+		t.Errorf("failed-only should hide direct entries: %q", t3)
+	}
+	if !strings.Contains(t3, "连接被拒绝") {
+		t.Errorf("failed-only should keep failures: %q", t3)
+	}
+}
+
+// feedRequest 把日志送进解析器（proc 回调）。
+func TestFeedRequest(t *testing.T) {
+	a := newTestApp(t)
+	a.feedRequest(`{"msg":"route(retry=0) x.com:443","sid":"z1"}`)
+	if a.requestCount() != 1 {
+		t.Errorf("count = %d", a.requestCount())
 	}
 }

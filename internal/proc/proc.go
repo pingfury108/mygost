@@ -91,6 +91,9 @@ type Manager struct {
 	exited chan struct{} // 每次 Start 新建，进程退出时关闭
 	extPID int           // >0 表示接管的外部进程（非本会话 exec 启动）
 
+	// onLine 可选：每读到一行日志时调用（用于解析请求决策），在 pump 的 goroutine 上执行
+	onLine func(line string)
+
 	logMu   sync.Mutex
 	logs    []string
 	logNext int
@@ -105,6 +108,13 @@ type Manager struct {
 // 日志默认保留最近 5000 行。
 func NewManager(notify func()) *Manager {
 	return &Manager{notify: notify, logs: make([]string, 5000)}
+}
+
+// SetOnLine 设置日志行回调（在读取 goroutine 上调用，勿做耗时操作）。
+func (m *Manager) SetOnLine(fn func(line string)) {
+	m.mu.Lock()
+	m.onLine = fn
+	m.mu.Unlock()
 }
 
 // Start 以 bin -C config 启动 gost。
@@ -389,7 +399,14 @@ func (m *Manager) pump(r *os.File) {
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for sc.Scan() {
-		m.pushLine(sc.Text())
+		raw := sc.Text()
+		m.mu.Lock()
+		cb := m.onLine
+		m.mu.Unlock()
+		if cb != nil {
+			cb(raw)
+		}
+		m.pushLine(raw)
 		m.notifySoon()
 	}
 }

@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"mygost/internal/geobin"
+	"mygost/internal/profiles"
 )
 
 // PluginURL 是 gost-geo-plugin 的 go install 包路径（来源 go-gost 官方）。
@@ -31,11 +32,8 @@ const DefaultIPListURL = "https://raw.githubusercontent.com/Loyalsoldier/geoip/r
 // DefaultListenPort 是插件 gRPC 监听端口。
 const DefaultListenPort = 8100
 
-// PrivateMatchers 是始终直连的私网段（写入 gost 配置的静态 bypass）。
-var PrivateMatchers = []string{
-	"127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
-	"169.254.0.0/16", "::1/128", "fc00::/7", "fe80::/10",
-}
+// PrivateMatchers 复用 profiles 的默认私网段，避免两处维护。
+var PrivateMatchers = profiles.DefaultPrivateMatchers
 
 // Manager 托管 geo 插件进程。
 type Manager struct {

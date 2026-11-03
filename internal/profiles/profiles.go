@@ -57,6 +57,23 @@ func NewID() string {
 }
 
 // BuildYAML 由表单字段生成 gost v3 配置；KindCustom 原样返回。
+// DefaultPrivateMatchers 是始终直连的本地/私有网段。
+//
+// 这些地址不该经过隧道：走了隧道就等于让远端服务器去访问它自己的局域网，
+// 轻则连不上，重则误连到远端内网的同 IP 设备。
+var DefaultPrivateMatchers = []string{
+	// IPv4 私有
+	"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
+	// 本机与链路本地
+	"127.0.0.0/8", "169.254.0.0/16", "0.0.0.0/8",
+	// 运营商级 NAT（Tailscale、部分 CGNAT 网络）
+	"100.64.0.0/10",
+	// 组播与广播（mDNS/DLNA 设备发现、受限广播）
+	"224.0.0.0/4", "255.255.255.255/32",
+	// IPv6
+	"::1/128", "::/128", "fc00::/7", "fe80::/10", "ff00::/8",
+}
+
 // SplitConfig 描述生成 YAML 时要附加的分流配置。
 type SplitConfig struct {
 	// Enabled 是否启用分流。
@@ -67,6 +84,14 @@ type SplitConfig struct {
 	PrivateMatchers []string
 	// MetricsAddr 非空时给 gost 打开 Prometheus 端点（如 127.0.0.1:9100）。
 	MetricsAddr string
+	// DebugLog 为 true 时把 gost 日志级别设为 debug（请求决策只在 debug 输出）。
+	DebugLog bool
+}
+
+// appendLogLevel 追加日志级别设置。
+func appendLogLevel(y []byte, level string) []byte {
+	s := strings.TrimRight(string(y), "\n")
+	return []byte(s + "\nlog:\n  level: " + level + "\n")
 }
 
 // appendMetrics 在配置末尾追加 metrics 段（统计流量与连接）。
@@ -78,12 +103,14 @@ func appendMetrics(y []byte, addr string) []byte {
 // NoSplit 是未启用分流时的默认参数。
 var NoSplit = SplitConfig{}
 
-// BuildYAMLSplit 在 BuildYAML 的基础上附加分流配置。
+// BuildYAMLSplit 在 BuildYAML 的基础上附加 bypass 与 metrics。
 //
-// 附加三块：
-//   - hop 引用 split-direct（黑名单命中 = 跳过上游 = 本机直连）
-//   - split-private：私网段始终直连
-//   - split-geo：白名单模式的 geo 插件（解析域名命中国内 IP → 允许直连）
+// bypass 分两层：
+//   - split-private：私网/本机/组播段直连。**只要有上游就始终生效**，
+//     否则局域网流量会被送到远端服务器去连它自己的内网。
+//   - split-geo：国内 IP 直连（白名单模式，由 geo 插件判断）。仅分流开启时加入。
+//
+// 两者由 split-direct 组合，挂在 hop 上：命中即跳过上游，由本机直连。
 func (p *Profile) BuildYAMLSplit(sc SplitConfig) ([]byte, error) {
 	y, err := p.BuildYAML()
 	if err != nil {
@@ -92,31 +119,48 @@ func (p *Profile) BuildYAMLSplit(sc SplitConfig) ([]byte, error) {
 	if sc.MetricsAddr != "" {
 		y = appendMetrics(y, sc.MetricsAddr)
 	}
-	if !sc.Enabled || p.Kind != KindProxy {
+	if sc.DebugLog {
+		y = appendLogLevel(y, "debug")
+	}
+	// 没有上游链就没有 hop，bypass 无处可挂（本机直连本就是默认行为）
+	if p.Kind != KindProxy || !p.UpEnabled {
 		return y, nil
 	}
+
+	useGeo := sc.Enabled && sc.PluginAddr != ""
+
 	s := string(y)
-	// bypass 插在 hop 名字行之后（属于该 hop 的键），而不是名字行之前
+	// 注意：gost 3.3.1 的配置解析器不支持 bypasses 里再嵌套引用其它 bypass
+	// （ParseBypass 只看 matchers/plugin/file），因此不能用"group"包一层。
+	// 正确写法是在 hop 上直接列多个 bypass —— HopConfig.Bypasses 会被
+	// 合并成 BypassGroup：白名单（geo）用 AND、黑名单（私网）用 OR。
 	hopRef := "      - name: hop-0\n"
 	if idx := strings.Index(s, hopRef); idx >= 0 {
 		pos := idx + len(hopRef)
-		s = s[:pos] + "        bypass: split-direct\n" + s[pos:]
+		list := "        bypasses:\n          - split-private\n"
+		if useGeo {
+			list += "          - split-geo\n"
+		}
+		s = s[:pos] + list + s[pos:]
 	}
 
 	var b strings.Builder
 	b.WriteString("\nbypasses:\n")
 
+	matchers := sc.PrivateMatchers
+	if len(matchers) == 0 {
+		matchers = DefaultPrivateMatchers // 调用方未指定时的安全默认
+	}
 	b.WriteString("  - name: split-private\n    matchers:\n")
-	for _, m := range sc.PrivateMatchers {
+	for _, m := range matchers {
 		b.WriteString("      - " + m + "\n")
 	}
 
-	b.WriteString("  - name: split-geo\n    whitelist: true\n    plugin:\n")
-	b.WriteString("      type: grpc\n")
-	b.WriteString("      addr: " + sc.PluginAddr + "\n")
-
-	b.WriteString("  - name: split-direct\n    bypasses:\n")
-	b.WriteString("      - split-private\n      - split-geo\n")
+	if useGeo {
+		b.WriteString("  - name: split-geo\n    whitelist: true\n    plugin:\n")
+		b.WriteString("      type: grpc\n")
+		b.WriteString("      addr: " + sc.PluginAddr + "\n")
+	}
 
 	s += b.String()
 	return []byte(s), nil

@@ -24,6 +24,8 @@ type Settings struct {
 	Split bool `json:"split"`
 	// SplitIPListURL 是国内 IP 列表下载地址，空用内置默认。
 	SplitIPListURL string `json:"splitIPListURL,omitempty"`
+	// RequestLog 开启 gost debug 日志，记录每个请求的去向（直连/代理）。
+	RequestLog bool `json:"requestLog,omitempty"`
 }
 
 // Store 并发安全地读写 settings.json。

@@ -19,6 +19,7 @@ import (
 	"mygost/internal/probe"
 	"mygost/internal/proc"
 	"mygost/internal/profiles"
+	"mygost/internal/reqlog"
 	"mygost/internal/settings"
 )
 
@@ -56,6 +57,10 @@ type app struct {
 	customBuf  *editor.State
 
 	// 日志页
+	logView       int  // 0=原始 1=请求
+	reqOnlyFailed bool // 请求视图：只看失败
+	reqs          *reqlog.Log
+
 	logFilter string
 	logFollow bool // 自动跟随最新日志（可关闭）
 	logSeen   int  // 上一帧的行数，用于只在新增时滚动
@@ -96,6 +101,7 @@ type app struct {
 	sLogin    bool
 	sSplit    bool
 	sSplitURL string
+	sReqLog   bool
 	splitBusy bool // 分流列表更新中
 
 	saveTimer *time.Timer // 文本输入防抖，停顿后才落盘
@@ -132,6 +138,7 @@ func main() {
 		a.sLogin = mygo.App.OpenAtLogin()
 		a.sSplit = s.Split
 		a.sSplitURL = s.SplitIPListURL
+		a.sReqLog = s.RequestLog
 		a.win = mygo.NewWindow(mygo.WindowOptions{
 			Title:     "mygost",
 			Width:     430,
@@ -205,7 +212,9 @@ func newApp() *app {
 		mc:        metrics.NewClient(""),
 		msp:       metrics.NewSpeed(5),
 	}
+	a.reqs = reqlog.New(500)
 	a.pm = proc.NewManager(a.onProcEvent)
+	a.pm.SetOnLine(a.feedRequest)
 	statsStore, err := metrics.LoadStore(dataDir)
 	if err != nil {
 		log.Printf("读取流量统计失败: %v", err)
