@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"mygost/internal/splitbin"
 )
 
 // 端口被其他程序占用时应自动换端口，而不是启动失败。
@@ -117,3 +119,60 @@ func writeRuleFiles(t *testing.T, dir string) {
 	os.WriteFile(filepath.Join(dir, "geoip-cn.txt"), []byte("1.0.1.0/24\n"), 0o644)
 	os.WriteFile(filepath.Join(dir, "geosite-cn.txt"), []byte("baidu.com\n"), 0o644)
 }
+
+// 回归：调用方 ctx 取消后插件必须继续运行。
+//
+// 曾经 Start 用 context.WithCancel(调用方 ctx)，而 ensureGeo 里
+// defer cancel() 会立刻取消它 → 插件被 exec.CommandContext 杀掉，
+// 表现为"启动成功但端口无监听"。
+func TestPluginSurvivesCallerContextCancel(t *testing.T) {
+	dir := t.TempDir()
+	writeRuleFiles(t, dir)
+	m := NewManager(dir, 18155)
+	if len(splitbinBin()) == 0 {
+		t.Skip("当前平台未嵌入插件")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	if err := m.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	cancel() // 模拟 ensureGeo 返回时的 defer cancel()
+	t.Cleanup(func() { m.ForceStop() })
+
+	time.Sleep(500 * time.Millisecond) // 给子进程被杀的时机
+	if !m.Running() {
+		t.Fatal("调用方 ctx 取消后插件不该被终止")
+	}
+	if !m.Alive() {
+		t.Fatal("插件应仍在监听")
+	}
+}
+
+// 回归：进程已退出时 Running 必须为 false，否则会永远认为插件健康、
+// 再也不重试（Split 的 gRPC 调用全部失败的根因之一）。
+func TestRunningFalseAfterExit(t *testing.T) {
+	dir := t.TempDir()
+	writeRuleFiles(t, dir)
+	m := NewManager(dir, 18156)
+	if len(splitbinBin()) == 0 {
+		t.Skip("当前平台未嵌入插件")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := m.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	m.Stop()
+	time.Sleep(400 * time.Millisecond)
+	if m.Running() {
+		t.Error("进程已停止，Running 应为 false")
+	}
+	if m.Alive() {
+		t.Error("进程已停止且无人监听，Alive 应为 false")
+	}
+}
+
+// splitbinBin 暴露嵌入的插件字节（测试用）。
+func splitbinBin() []byte { return splitbin.Plugin() }

@@ -45,15 +45,17 @@ func (a *app) viewRequests(c *ui.Context) {
 	}
 
 	// 汇总（按当前过滤后的列表统计）
-	var nDir, nPrx, nErr int
+	var nDir, nPrx, nErr, nUnknown int
 	for _, e := range entries {
 		switch {
 		case e.Err != "":
 			nErr++
 		case e.Decision == reqlog.Proxied:
 			nPrx++
-		default:
+		case e.Decision == reqlog.Direct:
 			nDir++
+		default:
+			nUnknown++ // 解析不出决策（插件不可达等）
 		}
 	}
 
@@ -113,6 +115,10 @@ func (a *app) viewRequests(c *ui.Context) {
 							ui.Textf(c, "%s %d · %s %d · %s %d",
 								tr("直连", "Direct"), nDir, tr("代理", "Proxy"), nPrx, tr("失败", "Failed"), nErr).
 								FontSize(fsCaption).Font("monospace").TextColor(t.TextMuted)
+							if nUnknown > 0 {
+								ui.Textf(c, " · %s %d", tr("未知", "Unknown"), nUnknown).
+									FontSize(fsCaption).Font("monospace").TextColor(t.TextMuted)
+							}
 						})
 					}
 				})
@@ -146,13 +152,19 @@ func (a *app) requestRow(c *ui.Context, e reqlog.Entry) {
 		ui.Text(c, e.At.Format("15:04:05")).FontSize(fsCaption).
 			Font("monospace").TextColor(t.TextMuted).Width(58)
 
-		// 去向标签：直连（灰）/ 代理（蓝）/ 失败（红）
-		label, color := tr("直连", "Direct"), t.TextMuted
-		switch {
-		case e.Err != "":
-			label, color = tr("失败", "Failed"), t.Danger
-		case e.Decision == reqlog.Proxied:
+		// 去向：直连（灰）/ 代理（蓝）/ 失败（红）/ 未知（浅灰，插件调用失败时）
+		//
+		// 以前 Unknown 落到默认分支显示成“直连”，插件没跑时全部流量都
+		// 看起来像走了直连，极具误导性。
+		label, color := tr("未知", "Unknown"), t.TextMuted
+		switch e.Decision {
+		case reqlog.Direct:
+			label, color = tr("直连", "Direct"), t.TextMuted
+		case reqlog.Proxied:
 			label, color = tr("代理", "Proxy"), t.Accent
+		}
+		if e.Err != "" {
+			label, color = tr("失败", "Failed"), t.Danger
 		}
 		requestBadge(c, label, color)
 

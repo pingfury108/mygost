@@ -60,6 +60,9 @@ type Manager struct {
 	external bool
 	lastErr  string
 
+	// exited 在自有进程退出时关闭，供 Running 判断进程是否真活着。
+	exited chan struct{}
+
 	// counts 缓存列表行数：域名表 11 万行，设置页每帧都会问一次，
 	// 每次重读文件会让滚动明显卡顿。按 mtime+size 失效。
 	counts map[string]lineCount
@@ -127,11 +130,25 @@ func fileReady(p string) bool {
 	return err == nil && !st.IsDir() && st.Size() > 0
 }
 
-// Running 报告自有进程是否还在（不代表服务可用，看 Alive）。
+// Running 报告自有进程是否**还活着**。
+//
+// 不能只看 m.cmd 非空：进程已退出但 Wait 回调还没轮到我们时，
+// cmd.Process 仍然非 nil，会误报“运行中”而不再重试。
 func (m *Manager) Running() bool {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.cmd != nil && m.cmd.Process != nil
+	cmd, exited := m.cmd, m.exited
+	m.mu.Unlock()
+	if cmd == nil || cmd.Process == nil {
+		return false
+	}
+	if exited != nil {
+		select {
+		case <-exited:
+			return false // 已退出
+		default:
+		}
+	}
+	return true
 }
 
 // Alive 报告插件服务是否可用：自有进程活着，或地址上已有可用实例。
@@ -274,7 +291,10 @@ func (m *Manager) start(ctx context.Context) error {
 		return err
 	}
 
-	cctx, cancel := context.WithCancel(ctx)
+	// 进程的生命周期不能挂在调用方 ctx 上：ensureGeo 用 defer cancel()，
+	// 一返回就会把插件杀掉（表现为“启动成功但端口无监听”）。
+	// 这里用独立 ctx，停不停只由 Stop() 决定。
+	cctx, cancel := context.WithCancel(context.Background())
 	cmd := exec.CommandContext(cctx, m.PluginPath(),
 		"--listen", m.Addr(),
 		"--ip-list", m.IPListPath(),
@@ -298,6 +318,8 @@ func (m *Manager) start(ctx context.Context) error {
 
 	m.mu.Lock()
 	m.cmd, m.cancel = cmd, cancel
+	exited := make(chan struct{})
+	m.exited = exited
 	m.mu.Unlock()
 
 	go func() {
@@ -307,7 +329,10 @@ func (m *Manager) start(ctx context.Context) error {
 		}
 		pr.Close()
 	}()
-	go func() { _ = cmd.Wait() }()
+	go func() {
+		_ = cmd.Wait()
+		close(exited)
+	}()
 	return nil
 }
 
