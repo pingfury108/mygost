@@ -82,8 +82,11 @@ func TestMainWithProfile(t *testing.T) {
 	if !tt.HasText("连接") {
 		t.Errorf("should offer connect, texts %q", tt.Texts())
 	}
-	if !tt.HasText("＋ 添加配置") {
-		t.Errorf("list should end with add card, texts %q", tt.Texts())
+	if !tt.HasText("＋ 添加") {
+		t.Errorf("section header should offer add, texts %q", tt.Texts())
+	}
+	if !tt.HasText("代理") {
+		t.Errorf("profile row should show kind tag, texts %q", tt.Texts())
 	}
 }
 
@@ -189,42 +192,32 @@ func TestSoftColors(t *testing.T) {
 	}
 }
 
-// 布局回归：光环必须比按钮大一圈，且两者尺寸显式（不可依赖父容器拉伸）。
+// 布局回归：双环光环必须比按钮大一圈以上，且尺寸显式（不可依赖父容器拉伸）。
 func TestConnectGeometry(t *testing.T) {
-	btn, halo := connectGeometry()
-	if btn <= 0 || halo != btn+sp3*2 {
-		t.Fatalf("halo(%v) 应为 button(%v)+2*sp3(%v)", halo, btn, sp3)
+	btn, ring1, ring2 := connectGeometry(false)
+	if rb, r1, r2 := connectGeometry(true); rb >= btn || r1 >= ring1 || r2 >= ring2 {
+		t.Fatalf("已连接态应更紧凑：(%v,%v,%v) 应小于 (%v,%v,%v)", rb, r1, r2, btn, ring1, ring2)
+	}
+	if btn <= 0 || ring1 <= btn || ring2 <= ring1 {
+		t.Fatalf("rings(%v,%v) 应严格大于 button(%v)", ring1, ring2, btn)
 	}
 }
 
-// 表单对齐回归：同一节的等宽两列，跨行的同列字段必须左边缘对齐。
-// 曾因两行各自 Grow(1) 分配比例不同而错位。
+// 表单回归：代理表单已改行式布局（标签左/控件右），不再用两列 Grid。
+// 这里验证关键行与出网分段存在且状态同步。
 func TestFormColumnsAligned(t *testing.T) {
 	a := newTestApp(t)
 	a.startNew()
 	a.form.UpEnabled = true
 	tt := ui.NewTester(a.view, 430, 900)
 
-	x := func(label string) float32 {
-		r, ok := tt.Find(label)
-		if !ok {
-			t.Fatalf("label %q not found", label)
+	for _, label := range []string{"监听地址", "协议", "本机认证", "出网", "名称"} {
+		if !tt.HasText(label) {
+			t.Errorf("proxy form should show %q row, texts %q", label, tt.Texts())
 		}
-		return r.X
 	}
-	// ① 本机监听：同一列跨行必须同 x
-	if got, want := x("账号（可选）"), x("地址"); got != want {
-		t.Errorf("左列未对齐：地址 x=%.1f，账号 x=%.1f", want, got)
-	}
-	if got, want := x("密码（可选）"), x("协议"); got != want {
-		t.Errorf("右列未对齐：协议 x=%.1f，密码 x=%.1f", want, got)
-	}
-	// ② 上游节点：同样规则
-	if got, want := x("服务器账号（可选）"), x("服务器协议"); got != want {
-		t.Errorf("上游左列未对齐：服务器协议 x=%.1f，服务器账号 x=%.1f", want, got)
-	}
-	if got, want := x("服务器密码（可选）"), x("服务器地址"); got != want {
-		t.Errorf("上游右列未对齐：服务器地址 x=%.1f，服务器密码 x=%.1f", want, got)
+	if !tt.HasText("经上游服务器") {
+		t.Errorf("outbound should use segmented control, texts %q", tt.Texts())
 	}
 }
 

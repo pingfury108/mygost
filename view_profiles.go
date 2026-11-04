@@ -22,13 +22,12 @@ func (a *app) viewProfileForm(c *ui.Context) {
 	t := c.Theme()
 	ui.Column(c).Fill().Children(func() {
 		// 顶部固定：类型切换是模式开关，滚动表单时也应常驻。
-		// 用文字标签页而非分段控件：无灰色轨道，视觉更轻，语义是"切换下方内容"。
-		ui.Column(c).FillWidth().Padding(sp2, sp4, 0).Gap(sp2).Children(func() {
-			if ui.Tabs(c, &a.formKind, kindNames...).Label("配置类型").Changed() {
+		// 用分段控件与全站控件语言统一（设置页、日志页同款）。
+		ui.Column(c).FillWidth().Padding(sp2, sp4, 0).Children(func() {
+			if segmentedFill(c, &a.formKind, kindNames...) {
 				a.syncFormKind()
 				a.formErr = ""
 			}
-			ui.Box(c).FillWidth().Height(1).Background(t.Border).Opacity(0.6)
 		})
 
 		// 中间区：表单滚动；YAML 编辑器直接占满可视区（放进滚动容器会算不出高度）
@@ -62,11 +61,20 @@ func (a *app) viewProfileForm(c *ui.Context) {
 				ui.Text(c, a.formErr).FontSize(fsCaption).TextColor(t.Danger)
 			}
 			ui.Row(c).FillWidth().Gap(sp2).Children(func() {
-				ui.Button(c, "取消").Grow(1).OnClick(func() {
+				cancel := ui.ButtonBase(c).Width(96).Padding(sp3+2, 0).Radius(10).
+					Background(t.Surface).Border(1, t.Border).Cursor(ui.CursorPointer).
+					Center().Children(func() {
+					ui.Text(c, tr("取消", "Cancel")).FontSize(fsBody).Bold().TextColor(t.TextMuted)
+				})
+				if cancel.Clicked() {
 					a.formErr = ""
 					a.goMain()
-				})
-				ui.PrimaryButton(c, "保存").Grow(2).OnClick(a.saveEdit)
+				}
+				saveLabel := tr("保存", "Save")
+				if kindValues[a.formKind] == profiles.KindCustom {
+					saveLabel = tr("校验并保存", "Validate & Save")
+				}
+				ui.PrimaryButton(c, saveLabel).Grow(1).OnClick(a.saveEdit)
 			})
 		})
 	})
@@ -92,23 +100,32 @@ func formSection(c *ui.Context, title, desc string, body func()) {
 //	② 出网方式  = 直连 / -F 上游
 //	③ 名称
 func (a *app) proxyForm(c *ui.Context) {
+	t := c.Theme()
 	card(c).Children(func() {
 		ui.Column(c).FillWidth().Gap(sp4).Children(func() {
 			formSection(c, "① 本机监听", "在这台机器上开一个代理端口", func() {
-				// 等宽两列网格：跨行字段始终对齐
-				ui.Grid(c).FillWidth().Columns(2).Gap(sp3).Children(func() {
-					ui.Field(c, "地址", func() {
-						ui.TextInput(c, &a.form.Listen).FillWidth().Placeholder(":8080")
+				ui.Column(c).FillWidth().Gap(sp2).Children(func() {
+					formRow(c, tr("监听地址", "Listen"), tr("留空则自动选择端口", "Empty to auto-pick"), func() {
+						ui.TextInput(c, &a.form.Listen).Width(formCtlW).
+							Font("monospace").Placeholder(":8080")
 					})
-					ui.Field(c, "协议", func() {
-						ui.Select(c, &a.form.Proto, proxyHandlers).FillWidth()
+					formRow(c, tr("协议", "Protocol"), tr("本机以什么协议对外提供代理", "Local proxy protocol"), func() {
+						// 常用的 http/socks5 用分段（设计稿 A5）；冷门协议回退下拉
+						if a.form.Proto == "http" || a.form.Proto == "socks5" || a.form.Proto == "" {
+							a.protoSeg = b2i(a.form.Proto == "socks5")
+							if segmentedFixed(c, &a.protoSeg, formCtlW, "http", "socks5") {
+								a.form.Proto = []string{"http", "socks5"}[a.protoSeg]
+							}
+						} else {
+							ui.Select(c, &a.form.Proto, proxyHandlers).Width(formCtlW)
+						}
 					})
-					ui.Field(c, "账号（可选）", func() {
-						ui.TextInput(c, &a.form.User).FillWidth().
-							Placeholder("留空则无需认证")
-					})
-					ui.Field(c, "密码（可选）", func() {
-						ui.TextInput(c, &a.form.Password).FillWidth().Password()
+					formRow(c, tr("本机认证", "Auth"), tr("可选 · 留空无需认证", "Optional"), func() {
+						ui.Row(c).Gap(6).Children(func() {
+							half := (formCtlW - 6) / 2
+							ui.TextInput(c, &a.form.User).Width(half).Placeholder(tr("账号", "user"))
+							ui.TextInput(c, &a.form.Password).Width(half).Password().Placeholder(tr("密码", "····"))
+						})
 					})
 				})
 			})
@@ -116,30 +133,30 @@ func (a *app) proxyForm(c *ui.Context) {
 			divider(c)
 
 			formSection(c, "② 出网方式", "流量从哪里连到目标", func() {
-				usingUp := a.form.UpEnabled
-				ui.RadioGroup(c, func() {
-					ui.Radio(c, &usingUp, false, "直连目标：本机直接连出去")
-					ui.Radio(c, &usingUp, true, "经上游服务器：先连服务器，由它代连（-F）")
-				})
-				if usingUp != a.form.UpEnabled {
-					a.form.UpEnabled = usingUp
+				// 分段切换比 radio 更明确：直连 / 经上游
+				a.upSeg = b2i(a.form.UpEnabled)
+				if segmentedFill(c, &a.upSeg, tr("直连目标", "Direct"),
+					tr("经上游服务器", "Via upstream")) {
+					a.form.UpEnabled = a.upSeg == 1
 				}
 				if a.form.UpEnabled {
-					ui.Box(c).FillWidth().Padding(sp3).Radius(rRow).
-						Background(c.Theme().Background).Children(func() {
-						ui.Grid(c).FillWidth().Columns(2).Gap(sp3).Children(func() {
-							ui.Field(c, "服务器协议", func() {
-								ui.Select(c, &a.form.UpProto, profiles.ConnectorTypes).FillWidth()
+					// 嵌套上游卡：淡底色区分层级；控件自解释（下拉即协议，placeholder 即账号密码）。
+					// 两行的首列必须同宽，否则中间的竖向分界错开，看起来很乱。
+					ui.Box(c).FillWidth().Padding(sp2).Radius(rRow).
+						Background(t.Background).Children(func() {
+						ui.Column(c).FillWidth().Gap(6).Children(func() {
+							ui.Row(c).FillWidth().Gap(6).Children(func() {
+								// MinWidth(0)：Select 自带内容最小宽（箭头+文字），不压就会比账号框宽
+								ui.Select(c, &a.form.UpProto, profiles.ConnectorTypes).
+									Width(upCtlW).MinWidth(0)
+								ui.TextInput(c, &a.form.UpAddr).Grow(1).
+									Font("monospace").Placeholder(tr("主机:端口", "host:port"))
 							})
-							ui.Field(c, "服务器地址", func() {
-								ui.TextInput(c, &a.form.UpAddr).FillWidth().
-									Placeholder("主机:端口")
-							})
-							ui.Field(c, "服务器账号（可选）", func() {
-								ui.TextInput(c, &a.form.UpUser).FillWidth()
-							})
-							ui.Field(c, "服务器密码（可选）", func() {
-								ui.TextInput(c, &a.form.UpPass).FillWidth().Password()
+							ui.Row(c).FillWidth().Gap(6).Children(func() {
+								ui.TextInput(c, &a.form.UpUser).Width(upCtlW).MinWidth(0).
+									Placeholder(tr("账号（可选）", "user (optional)"))
+								ui.TextInput(c, &a.form.UpPass).Grow(1).Password().
+									Placeholder(tr("密码（可选）", "password (optional)"))
 							})
 						})
 					})
@@ -149,7 +166,9 @@ func (a *app) proxyForm(c *ui.Context) {
 			divider(c)
 
 			formSection(c, "③ 名称", "只用于列表显示", func() {
-				ui.TextInput(c, &a.form.Name).Placeholder("如：家里出口")
+				formRow(c, tr("名称", "Name"), "", func() {
+					ui.TextInput(c, &a.form.Name).Grow(1).Placeholder("如：家里出口")
+				})
 			})
 		})
 	})
@@ -159,15 +178,23 @@ func (a *app) proxyForm(c *ui.Context) {
 //
 //	① 本机监听 -L ② 转发目标 ③ 名称
 func (a *app) forwardForm(c *ui.Context) {
+	t := c.Theme()
 	card(c).Children(func() {
 		ui.Column(c).FillWidth().Gap(sp4).Children(func() {
 			formSection(c, "① 本机监听", "在这台机器上开一个端口", func() {
-				ui.Grid(c).FillWidth().Columns(2).Gap(sp3).Children(func() {
-					ui.Field(c, "地址", func() {
-						ui.TextInput(c, &a.form.Listen).FillWidth().Placeholder(":2222")
+				ui.Column(c).FillWidth().Gap(sp2).Children(func() {
+					formRow(c, tr("监听地址", "Listen"), tr("留空则自动选择端口", "Empty to auto-pick"), func() {
+						ui.TextInput(c, &a.form.Listen).Width(formCtlW).
+							Font("monospace").Placeholder(":2222")
 					})
-					ui.Field(c, "协议", func() {
-						ui.Select(c, &a.form.FwdProto, []string{"tcp", "udp"}).FillWidth()
+					formRow(c, tr("协议", "Protocol"), tr("tcp 适用于 SSH、网页等服务", "tcp for SSH, web, etc."), func() {
+						fwdSeg := 0
+						if a.form.FwdProto == "udp" {
+							fwdSeg = 1
+						}
+						if segmentedFixed(c, &fwdSeg, formCtlW, "tcp", "udp") {
+							a.form.FwdProto = []string{"tcp", "udp"}[fwdSeg]
+						}
 					})
 				})
 			})
@@ -175,7 +202,42 @@ func (a *app) forwardForm(c *ui.Context) {
 			divider(c)
 
 			formSection(c, "② 转发到", "连接本机端口时，实际连到这些地址（多个即负载均衡）", func() {
-				ui.TextArea(c, &a.form.Targets).Lines(3, 6).Placeholder("192.168.1.10:22")
+				// 行式目标列表：比多行文本框更直观，多目标负载均衡看得见
+				a.syncTargets() // 兑底：保证等效命令与最新行一致
+				if len(a.fwdTargets) == 0 {
+					a.fwdTargets = []string{""}
+				}
+				ui.Column(c).FillWidth().Gap(sp2).Children(func() {
+					for i := range a.fwdTargets {
+						idx := i // 闭包捕获
+						ui.Row(c).FillWidth().Gap(sp2).AlignItems(ui.Center).Children(func() {
+							ui.TextInput(c, &a.fwdTargets[idx]).Grow(1).
+								Font("monospace").Placeholder("192.168.1.10:22").
+								OnChange(a.syncTargets)
+							del := iconButton(c, "✕")
+							if del.Clicked() && len(a.fwdTargets) > 1 {
+								a.fwdTargets = append(a.fwdTargets[:idx], a.fwdTargets[idx+1:]...)
+								a.syncTargets()
+							}
+						})
+					}
+					add := ui.ButtonBase(c).FillWidth().Height(32).Radius(rRow).
+						Background(c.Theme().SurfaceHover).Cursor(ui.CursorPointer).
+						Children(func() {
+							ui.Text(c, "＋ "+tr("添加目标", "Add target")).FontSize(fsCaption).
+								Bold().TextColor(c.Theme().Accent)
+						})
+					if add.Clicked() {
+						a.fwdTargets = append(a.fwdTargets, "")
+					}
+				})
+				// 多目标语义：设计稿 A7 的蓝点提示行
+				ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(sp2).Children(func() {
+					statusDot(c, c.Theme().Accent, 7)
+					ui.Text(c, tr("多个目标自动负载均衡 · 按顺序依次尝试",
+						"Multiple targets are load-balanced in order")).
+						FontSize(fsCaption).TextColor(t.TextMuted)
+				})
 			})
 
 			divider(c)
@@ -185,6 +247,17 @@ func (a *app) forwardForm(c *ui.Context) {
 			})
 		})
 	})
+}
+
+// syncTargets 把目标行写回 form.Targets（等效命令与保存都用它），空行自动忽略。
+func (a *app) syncTargets() {
+	kept := make([]string, 0, len(a.fwdTargets))
+	for _, s := range a.fwdTargets {
+		if v := strings.TrimSpace(s); v != "" {
+			kept = append(kept, v)
+		}
+	}
+	a.form.Targets = strings.Join(kept, "\n")
 }
 
 func (a *app) customForm(c *ui.Context) {
@@ -199,6 +272,17 @@ func (a *app) customForm(c *ui.Context) {
 				a.customBuf = newYAMLBuffer(a.yamlSeed())
 			}
 			editor.View(c, a.customBuf).Fill()
+		})
+		// 实时校验：语法是否正确一眼可见，不用等保存
+		ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(sp2).Children(func() {
+			if yamlValid(a.customBuf.Buffer.String()) {
+				statusDot(c, t.Success, 7)
+				ui.Text(c, tr("YAML 校验通过", "YAML is valid")).FontSize(fsCaption).TextColor(t.TextMuted)
+			} else {
+				statusDot(c, t.Danger, 7)
+				ui.Text(c, tr("YAML 语法有误 · 检查缩进与冒号", "Invalid YAML · check indent and colons")).
+					FontSize(fsCaption).TextColor(t.Danger)
+			}
 		})
 	})
 }
@@ -286,6 +370,8 @@ func (a *app) startNew() {
 	a.formUpOpen = true
 	a.formErr = ""
 	a.customBuf = nil
+	a.upSeg = 0
+	a.fwdTargets = []string{""}
 	a.page = "editor"
 }
 
@@ -301,6 +387,8 @@ func (a *app) startEdit(p *profiles.Profile) {
 	a.formUpOpen = p.UpEnabled
 	a.formErr = ""
 	a.customBuf = nil
+	a.upSeg = b2i(p.UpEnabled)
+	a.fwdTargets = splitTargets(p.Targets)
 	if p.Kind == profiles.KindCustom {
 		a.customBuf = newYAMLBuffer(p.YAML)
 	}
@@ -349,6 +437,9 @@ func (a *app) yamlSeed() string {
 // saveEdit 校验并保存。
 func (a *app) saveEdit() {
 	a.form.Kind = kindValues[a.formKind]
+	if a.form.Kind == profiles.KindForward {
+		a.syncTargets()
+	}
 	if a.form.Kind == profiles.KindCustom && a.customBuf != nil {
 		a.form.YAML = a.customBuf.Buffer.String()
 		if !yamlValid(a.form.YAML) {
@@ -385,4 +476,24 @@ func newYAMLBuffer(src string) *editor.State {
 func yamlValid(s string) bool {
 	var v map[string]any
 	return yaml.Unmarshal([]byte(s), &v) == nil
+}
+
+// b2i bool 转分段索引。
+func b2i(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+// splitTargets 把 Targets 拆成行（至少保留一行供编辑）。
+func splitTargets(s string) []string {
+	var out []string
+	for _, line := range strings.Split(s, "\n") {
+		out = append(out, strings.TrimSpace(line))
+	}
+	if len(out) == 0 {
+		out = []string{""}
+	}
+	return out
 }

@@ -32,6 +32,7 @@ const (
 	fsTitle    float32 = 20 // 子页面标题
 	fsDisplay  float32 = 28 // 空状态等页面级标题
 	fsMono     float32 = 12 // 日志与代码
+	fsStat     float32 = 20 // 速率卡等统计数字
 )
 
 // 图标/状态点尺寸
@@ -41,6 +42,7 @@ const (
 )
 
 // appTheme 由系统默认主题派生出应用主题，保留系统深浅色。
+// 配色对照设计稿：浅色=方向 A「澄澈」，深色=方向 B「曜石」。
 func appTheme(dark bool) *ui.Theme {
 	t := ui.LightTheme()
 	if dark {
@@ -49,23 +51,69 @@ func appTheme(dark bool) *ui.Theme {
 	// 间距单位与圆角跟 token 对齐
 	t.Spacing = sp1
 	t.Radius = rCtl
+
+	if dark {
+		// 曜石：近黑底 + 青色强调
+		t.Background = ui.RGB(0x0C, 0x0E, 0x11)   // 画布
+		t.Surface = ui.RGB(0x15, 0x18, 0x1D)      // 卡片
+		t.SurfaceHover = ui.RGB(0x1B, 0x20, 0x28) // 内嵌控件/胶囊
+		t.SurfacePressed = ui.RGB(0x23, 0x29, 0x32)
+		t.Border = ui.RGBA(255, 255, 255, 0.07)
+		t.Text = ui.RGB(0xE7, 0xEA, 0xEE)
+		t.TextMuted = ui.RGB(0x8B, 0x92, 0x9C)
+		t.Accent = ui.RGB(0x22, 0xD3, 0xEE)     // 青
+		t.AccentText = ui.RGB(0x04, 0x23, 0x1B) // 青底上的深色文字
+		t.Success = ui.RGB(0x10, 0xB9, 0x81)
+		t.Warning = ui.RGB(0xFB, 0xBF, 0x24)
+		t.Danger = ui.RGB(0xF8, 0x71, 0x71)
+	} else {
+		// 澄澈：灰底白卡 + 品牌蓝
+		t.Background = ui.RGB(0xF6, 0xF7, 0xF9)   // 画布
+		t.Surface = ui.RGB(0xFF, 0xFF, 0xFF)      // 卡片
+		t.SurfaceHover = ui.RGB(0xED, 0xEF, 0xF3) // 内嵌控件/胶囊
+		t.SurfacePressed = ui.RGB(0xE2, 0xE5, 0xEA)
+		t.Border = ui.RGB(0xE7, 0xE9, 0xEF)
+		t.Text = ui.RGB(0x17, 0x18, 0x1A)
+		t.TextMuted = ui.RGB(0x7C, 0x80, 0x89)
+		t.Accent = ui.RGB(0x25, 0x63, 0xEB) // 品牌蓝
+		t.AccentText = ui.RGB(255, 255, 255)
+		t.Success = ui.RGB(0x16, 0xA3, 0x4A)
+		t.Warning = ui.RGB(0xD9, 0x77, 0x06)
+		t.Danger = ui.RGB(0xDC, 0x26, 0x26)
+	}
 	return t
 }
 
 // accentSoft 是选中行的底色：主色的极淡版本，替代描边。
 func accentSoft(t *ui.Theme) ui.Color {
 	if t.Dark {
-		return ui.RGBA(59, 130, 246, 0.16)
+		return ui.RGBA(34, 211, 238, 0.10)
 	}
-	return ui.RGBA(37, 99, 235, 0.07)
+	return ui.RGBA(37, 99, 235, 0.08)
 }
 
-// successHalo 是"已连接"按钮外的光环：只声明状态，不参与文字语义。
+// successHalo 是"已连接"按钮光环的内环：只声明状态，不参与文字语义。
 func successHalo(t *ui.Theme) ui.Color {
 	if t.Dark {
 		return ui.RGBA(34, 197, 94, 0.18)
 	}
 	return ui.RGBA(22, 163, 74, 0.16)
+}
+
+// successHaloOuter 是光环的外环：更淡一层，形成双环衰减。
+func successHaloOuter(t *ui.Theme) ui.Color {
+	if t.Dark {
+		return ui.RGBA(34, 197, 94, 0.08)
+	}
+	return ui.RGBA(22, 163, 74, 0.07)
+}
+
+// accentHalo 是"可连接"按钮光环：蓝色主操作也有一圈柔光。
+func accentHalo(t *ui.Theme) ui.Color {
+	if t.Dark {
+		return ui.RGBA(34, 211, 238, 0.12)
+	}
+	return ui.RGBA(37, 99, 235, 0.10)
 }
 
 // dangerSoft 是危险提示条的底色。

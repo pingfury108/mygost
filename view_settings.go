@@ -19,10 +19,88 @@ func (a *app) viewSettings(c *ui.Context) {
 	t := c.Theme()
 	ui.Scroll(c).Fill().Children(func() {
 		ui.Column(c).FillWidth().Padding(sp4).Gap(sp3).Children(func() {
-			// ── gost 程序 ──
+			// ── 分流 ──
+			sectionHeader(c, tr("分流", "Routing"))
 			card(c).Children(func() {
 				ui.Column(c).FillWidth().Gap(sp3).Children(func() {
-					sectionTitle(c, "GOST 程序")
+					settingRow(c, tr("国内直连", "Direct for CN"),
+						tr("国内域名与 IP 直接连接，其余走隧道",
+							"CN domains and IPs connect directly, others via tunnel"), func() {
+							if ui.Switch(c, &a.sSplit).Changed() {
+								a.onSplitToggled()
+							}
+						})
+					if a.sSplit {
+						ui.Divider(c)
+						// 插件状态持久可见：分流是否真的在工作
+						a.splitStatusRow(c)
+						ui.Divider(c)
+						settingRow(c, tr("域名列表", "Domains"), a.domainListDesc(), func() {
+							if a.splitBusy {
+								ui.Spinner(c)
+							} else {
+								smallButton(c, tr("更新", "Update"), func() { go a.updateSplitLists() })
+							}
+						})
+						ui.Divider(c)
+						settingRow(c, tr("IP 列表", "IP list"), a.ipListDesc(), func() {
+							if a.splitBusy {
+								ui.Spinner(c)
+							} else {
+								smallButton(c, tr("更新", "Update"), func() { go a.updateSplitLists() })
+							}
+						})
+						ui.Divider(c)
+						settingRow(c, tr("未收录域名", "Unknown domains"),
+							tr("不在列表中的域名如何处理", "How to handle unlisted domains"), func() {
+								if segmentedFixed(c, &a.sSplitPolicy, formCtlW,
+									tr("走代理", "Proxy"), tr("按 IP 判断", "By IP")) {
+									a.saveSettings()
+									a.geoM.SetPolicy(policyOf(a.sSplitPolicy))
+									a.reconnectIfRunning()
+								}
+							})
+					}
+				})
+			})
+
+			// ── 行为 ──
+			sectionHeader(c, tr("行为", "Behavior"))
+			card(c).Children(func() {
+				ui.Column(c).FillWidth().Gap(sp3).Children(func() {
+					settingRow(c, "记录请求明细", "记录每个请求是直连还是走代理（debug 日志，量较大）", func() {
+						if ui.Switch(c, &a.sReqLog).Changed() {
+							a.saveSettings()
+							a.toast(tr("重新连接后生效", "Takes effect on next connect"), "success")
+						}
+					})
+					divider(c)
+					settingRow(c, "退出时保持运行", "关闭 mygost 后 gost 继续工作", func() {
+						if ui.Switch(c, &a.sKeep).Changed() {
+							a.saveSettings()
+						}
+					})
+					divider(c)
+					settingRow(c, "开机自启", "登录后自动运行 mygost", func() {
+						if ui.Switch(c, &a.sLogin).Changed() {
+							if err := mygo.App.SetOpenAtLogin(a.sLogin); err != nil {
+								a.toast("设置失败: "+err.Error(), "error")
+							}
+						}
+					})
+					divider(c)
+					settingRow(c, "自动运行", "启动后连接当前配置", func() {
+						if ui.Switch(c, &a.sAuto).Changed() {
+							a.saveSettings()
+						}
+					})
+				})
+			})
+
+			// ── gost 程序 ──
+			sectionHeader(c, "GOST 程序")
+			card(c).Children(func() {
+				ui.Column(c).FillWidth().Gap(sp3).Children(func() {
 
 					settingField(c, "本地路径", "留空时自动查找：数据目录 → 系统 PATH", func() {
 						ui.Row(c).FillWidth().Gap(sp2).Children(func() {
@@ -53,90 +131,16 @@ func (a *app) viewSettings(c *ui.Context) {
 						if a.dlBusy {
 							ui.Spinner(c)
 						} else {
-							ui.Button(c, "下载 / 更新").OnClick(func() { go a.doDownload() })
+							smallButton(c, tr("下载 / 更新", "Download"), func() { go a.doDownload() })
 						}
 					})
-				})
-			})
-
-			// ── 行为 ──
-			card(c).Children(func() {
-				ui.Column(c).FillWidth().Gap(sp3).Children(func() {
-					sectionTitle(c, "行为")
-					settingRow(c, "开机自启", "登录后自动运行 mygost", func() {
-						if ui.Switch(c, &a.sLogin).Changed() {
-							if err := mygo.App.SetOpenAtLogin(a.sLogin); err != nil {
-								a.toast("设置失败: "+err.Error(), "error")
-							}
-						}
-					})
-					divider(c)
-					settingRow(c, "自动运行", "启动后连接当前配置", func() {
-						if ui.Switch(c, &a.sAuto).Changed() {
-							a.saveSettings()
-						}
-					})
-					divider(c)
-					settingRow(c, "退出时保持运行", "关闭 mygost 后 gost 继续工作", func() {
-						if ui.Switch(c, &a.sKeep).Changed() {
-							a.saveSettings()
-						}
-					})
-					divider(c)
-					settingRow(c, "记录请求明细", "记录每个请求是直连还是走代理（debug 日志，量较大）", func() {
-						if ui.Switch(c, &a.sReqLog).Changed() {
-							a.saveSettings()
-							a.toast(tr("重新连接后生效", "Takes effect on next connect"), "success")
-						}
-					})
-				})
-			})
-
-			// ── 分流 ──
-			card(c).Children(func() {
-				ui.Column(c).FillWidth().Gap(sp3).Children(func() {
-					sectionTitle(c, tr("分流", "Routing"))
-					settingRow(c, tr("国内直连", "Direct for CN"),
-						tr("国内域名与 IP 直接连接，其余走隧道",
-							"CN domains and IPs connect directly, others via tunnel"), func() {
-							if ui.Switch(c, &a.sSplit).Changed() {
-								a.onSplitToggled()
-							}
-						})
-					if a.sSplit {
-						ui.Divider(c)
-						// 插件状态持久可见：分流是否真的在工作
-						a.splitStatusRow(c)
-						ui.Divider(c)
-						settingRow(c, tr("域名列表", "Domains"), a.domainListDesc(), func() {
-							if a.splitBusy {
-								ui.Spinner(c)
-							} else {
-								ui.Button(c, tr("更新", "Update")).OnClick(func() { go a.updateSplitLists() })
-							}
-						})
-						ui.Divider(c)
-						settingRow(c, tr("IP 列表", "IP list"), a.ipListDesc(), nil)
-						ui.Divider(c)
-						settingField(c, tr("未收录域名", "Unknown domains"),
-							tr("列表外的域名：走代理更严格；按 IP 判断会让国内小站直连",
-								"Unlisted: proxy is strict; by-IP lets CN sites connect directly"),
-							func() {
-								if ui.Segmented(c, &a.sSplitPolicy,
-									tr("走代理", "Proxy"), tr("按 IP 判断", "By IP")).Changed() {
-									a.saveSettings()
-									a.geoM.SetPolicy(policyOf(a.sSplitPolicy))
-									a.reconnectIfRunning()
-								}
-							})
-					}
 				})
 			})
 
 			// ── 维护 ──
+			sectionHeader(c, tr("维护", "Maintenance"))
 			card(c).Children(func() {
 				ui.Column(c).FillWidth().Gap(sp3).Children(func() {
-					sectionTitle(c, tr("维护", "Maintenance"))
 					settingRow(c, tr("残留进程", "Leftover processes"),
 						a.leftoverDesc(), func() {
 							if n := len(a.leftovers()); n > 0 {
@@ -147,9 +151,9 @@ func (a *app) viewSettings(c *ui.Context) {
 			})
 
 			// ── 关于 ──
+			sectionHeader(c, tr("关于", "About"))
 			card(c).Children(func() {
 				ui.Column(c).FillWidth().Gap(sp2).Children(func() {
-					sectionTitle(c, "关于")
 					kvRow(c, "应用", "mygost 0.1.0 · gost 桌面客户端")
 					kvRow(c, "数据目录", dataDir)
 					if a.stats != nil {
@@ -384,8 +388,27 @@ func (a *app) splitStatusRow(c *ui.Context) {
 		dot, text = t.Warning, tr("规则未下载", "Rules not downloaded")
 	}
 
-	ui.Row(c).AlignItems(ui.Center).Gap(sp2).Padding(sp1, 0).Children(func() {
+	ui.Row(c).AlignItems(ui.Center).Gap(sp3).Padding(sp1, 0).Children(func() {
 		statusDot(c, dot, dotSm)
-		ui.Text(c, text).FontSize(fsCaption).TextColor(t.TextMuted).Grow(1)
+		ui.Column(c).Grow(1).Gap(1).Children(func() {
+			ui.Text(c, text).FontSize(fsBody).TextColor(t.TextMuted)
+			if alive {
+				ui.Textf(c, "%s · %s", a.geoM.Addr(), a.splitCountsDesc()).
+					FontSize(fsCaption).Font("monospace").TextColor(t.TextMuted)
+			}
+		})
 	})
+}
+
+// splitCountsDesc 描述已下载的分流规则规模（域名 + IP 条数）。
+func (a *app) splitCountsDesc() string {
+	n, m := a.geoM.CountDomains(), a.geoM.CountIP()
+	switch {
+	case n > 0 && m > 0:
+		return fmt.Sprintf(tr("%d 个域名 / %d 条 IP", "%d domains / %d IPs"), n, m)
+	case n > 0 || m > 0:
+		return tr("规则不完整", "Incomplete rules")
+	default:
+		return tr("未下载", "Not downloaded")
+	}
 }

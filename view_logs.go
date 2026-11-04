@@ -35,15 +35,13 @@ func (a *app) viewLogs(c *ui.Context) {
 	}
 
 	ui.Column(c).Fill().Padding(sp4).Gap(sp3).Children(func() {
-		// 视图切换：原始日志 / 请求决策
-		ui.Segmented(c, &a.logView,
-			tr("原始日志", "Raw"), fmt.Sprintf(tr("请求 (%d)", "Requests (%d)"), a.requestCount())).
-			Label(tr("视图", "View"))
+		// 视图切换：原始日志 / 请求决策（与请求视图共用，保证能互相切换）
+		a.logViewTabs(c)
 
 		// 工具栏：搜索占满，其余为图标/次级按钮
 		ui.Row(c).FillWidth().Gap(sp2).AlignItems(ui.Center).Children(func() {
 			ui.TextInput(c, &a.logFilter).Grow(1).Placeholder("搜索日志…")
-			ui.Button(c, "复制").OnClick(func() {
+			ghostButton(c, tr("复制", "Copy"), func() {
 				c.Services().WriteClipboard(joinLines(shown)) // 所见即所得
 			})
 			menu := iconButton(c, "⋯")

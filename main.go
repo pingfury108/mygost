@@ -55,6 +55,9 @@ type app struct {
 	formErr    string // 表单内联错误
 	cmdPreview string // 等效命令（只读，每帧重算）
 	customBuf  *editor.State
+	upSeg      int      // 代理表单：出网分段 0=直连 1=经上游
+	protoSeg   int      // 代理表单：协议分段 0=http 1=socks5
+	fwdTargets []string // 端口转发表单：目标行（每行一个地址）
 
 	// 日志页
 	logView       int  // 0=原始 1=请求

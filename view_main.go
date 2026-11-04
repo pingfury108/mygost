@@ -6,12 +6,14 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/egoist/mygo/ui"
+	"gopkg.in/yaml.v3"
 	"mygost/internal/geo"
 	"mygost/internal/gostbin"
 	"mygost/internal/metrics"
@@ -40,60 +42,166 @@ func (a *app) viewEmpty(c *ui.Context) {
 	})
 }
 
-// viewDashboard 有配置后的完整形态：连接按钮 + gost 横条 + 配置列表。
+// viewDashboard 有配置后的完整形态：状态条 + 大圆按钮 + 速率卡 + 配置列表。
 func (a *app) viewDashboard(c *ui.Context) {
 	t := c.Theme()
-	state, _, _ := a.pm.State()
+	state, started, _ := a.pm.State()
 	running := state == proc.Running
 	runningID := a.runningProfileID()
 	current := a.st.Get().Current
 
 	ui.Column(c).Fill().Children(func() {
-		// ── 上 3：状态区（大圆按钮 = 连接当前选中档）──
-		ui.Column(c).FillWidth().HeightPercent(30).AlignItems(ui.Center).Justify(ui.Center).Children(func() {
-			// 颜色 = 状态：灰(未就绪) / 蓝(可连接，主操作) / 绿(已连接)
-			// 文字 = 动作：连接 / 断开。已连接时外加光环，让绿色只声明状态。
-			btnColor, btnText, btnTextColor := t.Surface, "连接", t.TextMuted
-			switch {
-			case running:
-				btnColor, btnText, btnTextColor = t.Success, "断开", t.AccentText
-			case current != "" && a.binFound:
-				btnColor, btnTextColor = t.Accent, t.AccentText
-			}
-			// 光环与按钮同心：用等尺寸的 Box 包一层，尺寸必须显式给出，
-			// 否则 Column 会把它横向拉满，光环变成横贯窗口的椭圆。
-			d, ringSize := connectGeometry()
-			halo := ui.Box(c).Width(ringSize).Height(ringSize).
-				Radius(ringSize / 2).Center()
+		// ── 顶部状态条：品牌 + 连接状态（时长用等宽）──
+		ui.Row(c).FillWidth().AlignItems(ui.Center).
+			Padding(sp6, sp6, 0).Children(func() {
+			ui.Text(c, "mygost").FontSize(fsEmphasis).Bold()
+			ui.Box(c).Grow(1)
 			if running {
-				halo = halo.Background(successHalo(t))
-			}
-			halo.Children(func() {
-				big := ui.ButtonBase(c).Width(d).Height(d).Radius(d / 2).Background(btnColor).
-					Cursor(ui.CursorPointer).Children(func() {
-					ui.Column(c).Fill().Center().Children(func() {
-						ui.Text(c, btnText).FontSize(fsEmphasis).Bold().TextColor(btnTextColor)
-					})
-				})
-				if big.Clicked() {
-					go a.toggleMain(runningID)
-				}
-			})
-
-			// 实时速率：仅在运行中且有数据时渲染（未连接时不显示 0）
-			if running && a.metricsOK {
-				ui.Row(c).Gap(sp3).Children(func() {
-					ui.Text(c, "↑ "+metrics.FormatRate(a.rates.Up)).
-						FontSize(fsCaption).TextColor(t.TextMuted)
-					ui.Text(c, "↓ "+metrics.FormatRate(a.rates.Down)).
-						FontSize(fsCaption).TextColor(t.TextMuted)
-				})
+				statusPill(c, t.Success, tr("已连接", "Connected"), formatDuration(time.Since(started)))
+			} else {
+				statusPill(c, mutedDot(t), tr("未连接", "Offline"))
 			}
 		})
 
-		// ── gost 未安装横条 ──
+		// ── 状态区：大圆按钮 + 当前配置 ──
+		topPad := sp6
+		if running {
+			topPad = sp3 // 连接后收紧，给配置列表让出空间
+		}
+		ui.Column(c).FillWidth().AlignItems(ui.Center).Padding(topPad, 0, 0).Children(func() {
+			// 颜色 = 状态：灰(未就绪) / 蓝(可连接，主操作) / 绿(已连接)
+			btnColor, btnText, btnTextColor := t.Surface, tr("连接", "Connect"), t.TextMuted
+			switch {
+			case running:
+				btnColor, btnText, btnTextColor = t.Success, tr("断开", "Disconnect"), t.AccentText
+			case current != "" && a.binFound:
+				btnColor, btnTextColor = t.Accent, t.AccentText
+			}
+			// 双环光环：外环更淡一层，衰减感更强。
+			// 尺寸必须显式给出，否则 Column 会把它横向拉满变成椭圆。
+			d, ring1, ring2 := connectGeometry(running)
+			outer := ui.Box(c).Width(ring2).Height(ring2).Radius(ring2 / 2).Center()
+			if running {
+				outer = outer.Background(successHaloOuter(t))
+			}
+			outer.Children(func() {
+				inner := ui.Box(c).Width(ring1).Height(ring1).Radius(ring1 / 2).Center()
+				switch {
+				case running:
+					inner = inner.Background(successHalo(t))
+				case current != "" && a.binFound:
+					inner = inner.Background(accentHalo(t))
+				}
+				inner.Children(func() {
+					big := ui.ButtonBase(c).Width(d).Height(d).Radius(d / 2).Background(btnColor).
+						Cursor(ui.CursorPointer).Children(func() {
+						ui.Column(c).Fill().Center().Children(func() {
+							ui.Text(c, btnText).FontSize(fsEmphasis).Bold().TextColor(btnTextColor)
+						})
+					})
+					if big.Clicked() {
+						go a.toggleMain(runningID)
+					}
+				})
+			})
+
+			// 当前配置名与摘要：让"连的是谁"一眼可见
+			if p := a.currentProfile(); p != nil {
+				ui.Column(c).AlignItems(ui.Center).Padding(sp3+2, 0, 0).Gap(1).Children(func() {
+					ui.Text(c, p.Name).FontSize(fsEmphasis).Bold()
+					ui.Text(c, p.Summary()).FontSize(fsCaption).
+						Font("monospace").TextColor(t.TextMuted).SingleLine()
+				})
+			} else {
+				ui.Text(c, tr("先在下方选用一个配置", "Pick a profile below")).
+					FontSize(fsCaption).TextColor(t.TextMuted).Padding(sp3+2, 0, 0)
+			}
+		})
+
+		// ── 速率卡：仅运行中且有数据时渲染（未连接不显示 0）──
+		if running && a.metricsOK {
+			ui.Box(c).Padding(sp6, sp6, 0).Children(func() {
+				ui.Column(c).FillWidth().Radius(rCard).Background(t.Surface).
+					Padding(sp3, 0, sp3-2).Children(func() {
+					ui.Row(c).FillWidth().Children(func() {
+						a.rateCell(c, tr("上传", "Up"), a.rates.Up, t.Accent)
+						ui.Box(c).Width(1).Height(40).Background(t.Border)
+						a.rateCell(c, tr("下载", "Down"), a.rates.Down, t.Success)
+					})
+					ui.Box(c).FillWidth().Height(1).Margin(sp3-2, sp4, 0).
+						Background(t.Border).Opacity(0.6)
+					ui.Row(c).FillWidth().Justify(ui.Center).Padding(sp3-2, 0, 0).Children(func() {
+						ui.Textf(c, "%s　↑ %s　·　↓ %s", tr("本次会话", "This session"),
+							metrics.FormatBytes(a.rates.TotalUp), metrics.FormatBytes(a.rates.TotalDown)).
+							FontSize(fsCaption).Font("monospace").TextColor(t.TextMuted)
+					})
+				})
+			})
+		}
+
+		// ── 分流状态卡：未连接时提醒用户分流在工作 ──
+		if !running && a.st.Get().Split {
+			ui.Column(c).FillWidth().Padding(sp6, sp6, 0).Gap(sp2).Children(func() {
+				ui.Row(c).FillWidth().AlignItems(ui.Center).Padding(0, sp1).Children(func() {
+					ui.Text(c, tr("分流", "Routing")).FontSize(fsCaption).Bold().TextColor(t.TextMuted).Grow(1)
+					goSet := ui.ButtonBase(c).Padding(0, sp1).Cursor(ui.CursorPointer).Children(func() {
+						ui.Text(c, tr("设置", "Settings")).FontSize(fsCaption).Bold().TextColor(t.Accent)
+					})
+					if goSet.Clicked() {
+						a.page = "settings"
+					}
+				})
+				goSettings := ui.ButtonBase(c).FillWidth().Padding(sp3, sp4).Radius(rCard).
+					Background(t.Surface).Cursor(ui.CursorPointer).Children(func() {
+					ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(sp3).Children(func() {
+						ui.Column(c).Grow(1).Gap(1).Children(func() {
+							ui.Text(c, tr("国内直连", "Direct for CN")).FontSize(fsBody)
+							ui.Textf(c, "%s · %s", tr("已开启", "On"), a.splitCountsDesc()).
+								FontSize(fsCaption).TextColor(t.TextMuted)
+						})
+						miniSwitch(c, true)
+					})
+				})
+				if goSettings.Clicked() {
+					a.page = "settings"
+				}
+			})
+		}
+
+		// ── 配置列表：分节标题 + 分组卡片 ──
+		// Grow(1)+Shrink(1)：占满剩余高度但不超过它，N 条配置只在卡内滚动，
+		// 不会把底栏推出窗口（曾因只写 Shrink(1) 而被内容撞开）。
+		ui.Column(c).FillWidth().Grow(1).Shrink(1).
+			Padding(sp6, sp6, 0).Gap(sp2).Children(func() {
+			ui.Row(c).FillWidth().AlignItems(ui.Center).Padding(0, sp1).Children(func() {
+				// 带总数：列表超出可视区时，用户才知道还有几条（滚动条 hover 才显）
+				ui.Textf(c, tr("配置 · %d", "Profiles · %d"), len(a.ps.Items())).
+					FontSize(fsCaption).Bold().TextColor(t.TextMuted).Grow(1)
+				add := ui.ButtonBase(c).Padding(0, sp1).Cursor(ui.CursorPointer).Children(func() {
+					ui.Text(c, "＋ "+tr("添加", "Add")).FontSize(fsCaption).Bold().TextColor(t.Accent)
+				})
+				if add.Clicked() {
+					a.startNew()
+				}
+			})
+			ui.Box(c).FillWidth().Grow(1).Radius(rCard).
+				Background(t.Surface).Clip().Children(func() {
+				ui.Scroll(c).Fill().Children(func() {
+					ui.Column(c).FillWidth().Children(func() {
+						for i, p := range a.ps.Items() {
+							if i > 0 {
+								divider(c)
+							}
+							a.profileRow(c, p, p.ID == current, p.ID == runningID)
+						}
+					})
+				})
+			})
+		})
+
+		// ── gost 未安装横条：优先于列表展示 ──
 		if !a.binFound {
-			ui.Box(c).Padding(0, sp4).Children(func() {
+			ui.Box(c).FillWidth().Padding(sp6, sp6, 0).Children(func() {
 				ui.Box(c).FillWidth().Padding(sp3, sp4).Radius(rRow).
 					Background(warningSoft(t)).Children(func() {
 					ui.Row(c).Gap(sp3).AlignItems(ui.Center).Children(func() {
@@ -116,23 +224,24 @@ func (a *app) viewDashboard(c *ui.Context) {
 			})
 		}
 
-		// ── 下 7：配置列表 ──
-		ui.Box(c).Fill().Grow(1).Padding(sp3, sp4, sp4).Children(func() {
-			ui.Scroll(c).Fill().Children(func() {
-				ui.Column(c).FillWidth().Gap(sp2).Children(func() {
-					for _, p := range a.ps.Items() {
-						a.profileRow(c, p, p.ID == current, p.ID == runningID)
-					}
-					// 列表末尾：轻量添加入口（次级操作，不与配置卡片抢视觉）
-					add := ui.ButtonBase(c).FillWidth().Height(36).Radius(rRow).
-						Cursor(ui.CursorPointer).Children(func() {
-						ui.Text(c, "＋ 添加配置").FontSize(fsBody).TextColor(t.TextMuted)
-					})
-					if add.Clicked() {
-						a.startNew()
-					}
-				})
-			})
+		// ── 底部状态行：分流是否真的在工作 ──
+		ui.Row(c).FillWidth().AlignItems(ui.Center).Justify(ui.Center).Gap(sp2).
+			Padding(sp3, 0, sp3).Shrink(0).Children(func() {
+			switch {
+			case running && a.st.Get().Split:
+				if a.geoM.Running() && portOpen(a.geoM.Addr()) {
+					statusDot(c, t.Success, 7)
+					ui.Text(c, tr("分流运行中 · 规则已就绪", "Routing active · rules ready")).
+						FontSize(fsCaption).TextColor(t.TextMuted)
+				} else {
+					statusDot(c, t.Danger, 7)
+					ui.Text(c, tr("插件未运行 · 将自动重启", "Plugin down · restarting")).
+						FontSize(fsCaption).TextColor(t.Danger)
+				}
+			case !running:
+				ui.Text(c, tr("连接后可查看实时速率与流量", "Rates and traffic appear once connected")).
+					FontSize(fsCaption).TextColor(t.TextMuted)
+			}
 		})
 	})
 
@@ -155,7 +264,48 @@ func (a *app) viewDashboard(c *ui.Context) {
 
 }
 
-// profileRow 渲染一行配置：点行 = 选用；编辑/删除在 ⋯ 菜单或右键。
+// rateCell 是速率卡的半边：标签 + 大号等宽数字。
+func (a *app) rateCell(c *ui.Context, label string, v float64, color ui.Color) {
+	t := c.Theme()
+	ui.Column(c).Grow(1).AlignItems(ui.Center).Gap(1).Children(func() {
+		ui.Text(c, label).FontSize(fsCaption).TextColor(t.TextMuted)
+		ui.Text(c, metrics.FormatRate(v)).FontSize(fsStat).Bold().
+			Font("monospace").TextColor(color)
+	})
+}
+
+// miniSwitch 是纯展示的小开关（分流的"已开启"状态）。
+func miniSwitch(c *ui.Context, on bool) {
+	t := c.Theme()
+	w, h, k := float32(36), float32(21), float32(17)
+	bg := t.SurfaceHover
+	if on {
+		bg = t.Success
+	}
+	ui.Box(c).Width(w).Height(h).Radius(h / 2).Background(bg).Children(func() {
+		// 白色旋钮在深浅两套主题里都成立
+		knob := ui.Box(c).Width(k).Height(k).Radius(k / 2).Background(ui.RGB(255, 255, 255))
+		if on {
+			knob = knob.Margin(2, 0, 0, w-k-4)
+		} else {
+			knob = knob.Margin(2, 0, 0, 2)
+		}
+	})
+}
+
+// mutedDot 未连接状态的灰点。
+func mutedDot(t *ui.Theme) ui.Color { return t.TextMuted }
+
+// formatDuration 把会话时长格式化为 hh:mm:ss。
+func formatDuration(d time.Duration) string {
+	d = d.Truncate(time.Second)
+	h := int(d.Hours())
+	m := int(d.Minutes()) % 60
+	s := int(d.Seconds()) % 60
+	return fmt.Sprintf("%02d:%02d:%02d", h, m, s)
+}
+
+// profileRow 渲染分组卡片内的一行配置：点行 = 选用；编辑/删除在 ⋯ 菜单或右键。
 func (a *app) profileRow(c *ui.Context, p *profiles.Profile, isCurrent, isRunning bool) {
 	t := c.Theme()
 	// 选中用淡底 + 左侧色条表达，不再用描边（描边只留给键盘焦点）
@@ -163,27 +313,36 @@ func (a *app) profileRow(c *ui.Context, p *profiles.Profile, isCurrent, isRunnin
 	if isCurrent {
 		bg = accentSoft(t)
 	}
-	row := ui.ButtonBase(c).FillWidth().Padding(sp3, sp3).Radius(rRow).
+	row := ui.ButtonBase(c).FillWidth().Padding(sp3, sp3).Radius(0).
 		Background(bg).Cursor(ui.CursorPointer).
 		Tooltip("点击选用；编辑在 ⋯ 菜单").Children(func() {
-		ui.Row(c).FillWidth().Gap(sp3).AlignItems(ui.Start).Children(func() {
-			// 左侧：选中标记 / 运行状态点（单一编码）
+		ui.Row(c).FillWidth().Gap(sp3).AlignItems(ui.Center).Children(func() {
+			// 左侧：选中 ✓ / 运行状态点（单一编码）
 			if isCurrent {
 				ui.Box(c).Width(3).Height(34).Radius(1.5).Background(t.Accent)
-			}
-			// 名称与摘要（选中行有测试结果时，摘要行临时换成结果）
-			ui.Column(c).Grow(1).Gap(2).Children(func() {
-				ui.Row(c).Gap(sp2).AlignItems(ui.Center).Children(func() {
-					ui.Text(c, p.Name).FontSize(fsEmphasis)
+				ui.Box(c).Width(18).Height(18).Radius(9).Background(t.Accent).Center().
+					Children(func() {
+						ui.Text(c, "✓").FontSize(11).Bold().TextColor(t.AccentText)
+					})
+			} else {
+				ui.Box(c).Width(3)
+				ui.Box(c).Width(18).Height(18).Center().Children(func() {
 					if isRunning {
 						statusDot(c, t.Success, dotSm)
 					}
-					ui.Text(c, profiles.KindLabel(p.Kind)).FontSize(fsCaption).TextColor(t.TextMuted)
+				})
+			}
+			// 名称 + 类型标签 + 摘要（选中行有测试结果时，摘要行临时换成结果）
+			ui.Column(c).Grow(1).Gap(2).Children(func() {
+				ui.Row(c).Gap(sp2).AlignItems(ui.Center).Children(func() {
+					ui.Text(c, p.Name).FontSize(fsEmphasis).Bold()
+					tagPill(c, profiles.KindLabel(p.Kind), isCurrent)
 				})
 				if res, ok := a.testResultOf(p.ID); ok {
 					a.inlineTestResult(c, res)
 				} else {
-					ui.Text(c, p.Summary()).FontSize(fsBody).TextColor(t.TextMuted).SingleLine()
+					ui.Text(c, p.Summary()).FontSize(fsCaption).
+						Font("monospace").TextColor(t.TextMuted).SingleLine()
 				}
 			})
 
@@ -227,13 +386,19 @@ func (a *app) profileRow(c *ui.Context, p *profiles.Profile, isCurrent, isRunnin
 	})
 }
 
-// connectGeometry 返回大圆按钮与光环的边长。
+// connectGeometry 返回大圆按钮与双环光环的边长。
 //
-// 两者都必须显式给出尺寸：Column 会把未定宽的 Box 横向拉满，
+// 三者都必须显式给出尺寸：Column 会把未定宽的 Box 横向拉满，
 // 光环就会变成横贯窗口的椭圆（v0.1 曾如此）。
-func connectGeometry() (button, halo float32) {
-	const d float32 = 88
-	return d, d + sp3*2
+//
+// 已连接时收紧一档：此时速率与配置列表才是重点，按钮只需保持可点。
+func connectGeometry(running bool) (button, ring1, ring2 float32) {
+	if running {
+		const d float32 = 84
+		return d, d + 22, d + 50
+	}
+	const d float32 = 104
+	return d, d + 28, d + 64
 }
 
 // toggleMain 主按钮：运行则断开，否则连接当前档。
@@ -281,6 +446,10 @@ func (a *app) doStart() {
 		if err := a.pm.Attach(pid, started); err != nil {
 			a.toast(tr("接管失败: ", "Attach failed: ")+err.Error(), "error")
 			return
+		}
+		// 接管的进程也要挂上 metrics 抓取，否则已连接却看不到速率卡
+		if port, ok := metricsPortFromYaml(a.ps.YamlPath(id)); ok {
+			a.startMetrics(port)
 		}
 		a.toast(tr("已接管上次运行的 gost", "Attached to the running gost"), "success")
 		return
@@ -563,4 +732,30 @@ func fmtDuration(d time.Duration) string {
 		return fmt.Sprintf("%d:%02d:%02d", h, m, s)
 	}
 	return fmt.Sprintf("%d:%02d", m, s)
+}
+
+// metricsPortFromYaml 从已生成的配置里读 metrics 端口（接管路径用：
+// 接管的 gost 配置里已写好 metrics.addr，解析出来即可挂上抓取）。
+func metricsPortFromYaml(path string) (int, bool) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return 0, false
+	}
+	var doc struct {
+		Metrics struct {
+			Addr string `yaml:"addr"`
+		} `yaml:"metrics"`
+	}
+	if yaml.Unmarshal(b, &doc) != nil {
+		return 0, false
+	}
+	_, port, err := net.SplitHostPort(doc.Metrics.Addr)
+	if err != nil {
+		return 0, false
+	}
+	n, err := strconv.Atoi(port)
+	if err != nil || n <= 0 {
+		return 0, false
+	}
+	return n, true
 }

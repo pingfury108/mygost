@@ -10,6 +10,12 @@ import (
 	"mygost/internal/reqlog"
 )
 
+// logViewTabs 是日志两个视图共用的切换栏：否则切到请求视图后没地方切回来。
+func (a *app) logViewTabs(c *ui.Context) {
+	segmentedFill(c, &a.logView,
+		tr("原始日志", "Raw"), fmt.Sprintf(tr("请求 (%d)", "Requests (%d)"), a.requestCount()))
+}
+
 // viewRequests 是日志页的「请求」视图：每个请求一行，含去向与失败原因。
 func (a *app) viewRequests(c *ui.Context) {
 	t := c.Theme()
@@ -38,12 +44,41 @@ func (a *app) viewRequests(c *ui.Context) {
 		entries = entries[len(entries)-200:]
 	}
 
+	// 汇总（按当前过滤后的列表统计）
+	var nDir, nPrx, nErr int
+	for _, e := range entries {
+		switch {
+		case e.Err != "":
+			nErr++
+		case e.Decision == reqlog.Proxied:
+			nPrx++
+		default:
+			nDir++
+		}
+	}
+
 	ui.Column(c).Fill().Padding(sp4).Gap(sp3).Children(func() {
-		// 工具栏
+		// 视图切换（共用，保证能切回原始日志）
+		a.logViewTabs(c)
+
+		// 工具栏：搜索 + 仅失败胶囊 + 复制描边按钮 + ⋯ 菜单
 		ui.Row(c).FillWidth().Gap(sp2).AlignItems(ui.Center).Children(func() {
-			ui.TextInput(c, &a.logFilter).Grow(1).Placeholder(tr("过滤目标或错误…", "Filter target or error…"))
-			ui.Toggle(c, &a.reqOnlyFailed, tr("仅失败", "Failed only")).FontSize(fsCaption)
-			ui.Button(c, tr("清空", "Clear")).OnClick(func() { a.reqs.Clear() })
+			ui.TextInput(c, &a.logFilter).Grow(1).
+				Placeholder(tr("搜索域名…", "Search host…"))
+			chipToggle(c, &a.reqOnlyFailed, tr("仅看失败", "Failed"))
+			ghostButton(c, tr("复制", "Copy"), func() {
+				lines := make([]string, 0, len(entries))
+				for _, e := range entries {
+					lines = append(lines, e.At.Format("15:04:05")+"\t"+e.Target+"\t"+e.Decision.String())
+				}
+				c.Services().WriteClipboard(joinLines(lines))
+			})
+			menu := iconButton(c, "⋯")
+			menu.Menu(func(m *ui.Menu) {
+				if m.Item(tr("清空请求记录", "Clear requests")).Chosen() {
+					a.reqs.Clear()
+				}
+			})
 		})
 
 		ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(sp2).Children(func() {
@@ -72,16 +107,42 @@ func (a *app) viewRequests(c *ui.Context) {
 					for _, e := range entries {
 						a.requestRow(c, e)
 					}
+					// 底部汇总：当前列表的直连/代理/失败分布
+					if len(entries) > 0 {
+						ui.Row(c).FillWidth().Justify(ui.Center).Padding(sp2, 0).Children(func() {
+							ui.Textf(c, "%s %d · %s %d · %s %d",
+								tr("直连", "Direct"), nDir, tr("代理", "Proxy"), nPrx, tr("失败", "Failed"), nErr).
+								FontSize(fsCaption).Font("monospace").TextColor(t.TextMuted)
+						})
+					}
 				})
 			})
 		})
 	})
 }
 
-// requestRow 渲染一条请求：时间 · 目标 · 去向 · 节点/错误。
+// requestBadge 是去向胶囊：直连（灰）/ 代理（蓝淡底）/ 失败（红淡底）。
+func requestBadge(c *ui.Context, label string, color ui.Color) {
+	t := c.Theme()
+	bg := t.SurfaceHover
+	switch color {
+	case t.Accent:
+		bg = accentSoft(t)
+	case t.Danger:
+		bg = dangerSoft(t)
+	}
+	ui.Box(c).Width(44).Children(func() {
+		ui.Box(c).Padding(2, sp2).Radius(5).Background(bg).
+			Children(func() {
+				ui.Text(c, label).FontSize(fsCaption).Bold().TextColor(color)
+			})
+	})
+}
+
+// requestRow 渲染一条请求：时间 · 去向胶囊 · 目标（下行是节点/错误）。
 func (a *app) requestRow(c *ui.Context, e reqlog.Entry) {
 	t := c.Theme()
-	ui.Row(c).FillWidth().Gap(sp2).AlignItems(ui.Center).Padding(2, 2).Children(func() {
+	ui.Row(c).FillWidth().Gap(sp2).AlignItems(ui.Center).Padding(3, 2).Children(func() {
 		ui.Text(c, e.At.Format("15:04:05")).FontSize(fsCaption).
 			Font("monospace").TextColor(t.TextMuted).Width(58)
 
@@ -93,16 +154,27 @@ func (a *app) requestRow(c *ui.Context, e reqlog.Entry) {
 		case e.Decision == reqlog.Proxied:
 			label, color = tr("代理", "Proxy"), t.Accent
 		}
-		ui.Text(c, label).FontSize(fsCaption).TextColor(color).Width(30)
+		requestBadge(c, label, color)
 
-		ui.Text(c, e.Target).FontSize(fsBody).Grow(1).SingleLine()
-
-		// 右侧：错误原因优先，其次节点
-		if e.Err != "" {
-			ui.Text(c, e.Err).FontSize(fsCaption).TextColor(t.Danger).MaxLines(1)
-		} else if e.Node != "" {
-			ui.Text(c, e.Node).FontSize(fsCaption).TextColor(t.TextMuted).MaxLines(1)
-		}
+		// 目标在上，节点/错误在下；目标缺失时（如只有 dial 错误）错误作主行
+		ui.Column(c).Grow(1).Gap(1).Children(func() {
+			if e.Target != "" {
+				ui.Text(c, e.Target).FontSize(fsBody).
+					Font("monospace").SingleLine()
+			}
+			if e.Err != "" {
+				main := e.Err != "" && e.Target == ""
+				tx := ui.Text(c, e.Err).FontSize(fsCaption).SingleLine()
+				if main {
+					tx = tx.FontSize(fsBody).Font("monospace")
+				} else {
+					tx = tx.TextColor(t.Danger)
+				}
+			} else if e.Decision == reqlog.Proxied && e.Node != "" {
+				ui.Textf(c, "→ %s", e.Node).FontSize(fsCaption).
+					Font("monospace").TextColor(t.TextMuted).SingleLine()
+			}
+		})
 	})
 }
 
