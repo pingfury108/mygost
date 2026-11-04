@@ -229,7 +229,8 @@ func (a *app) viewDashboard(c *ui.Context) {
 			Padding(sp3, 0, sp3).Shrink(0).Children(func() {
 			switch {
 			case running && a.st.Get().Split:
-				if a.geoM.Running() && portOpen(a.geoM.Addr()) {
+				// 读后台探测好的 vm.splitAlive，不在渲染里拨 TCP
+				if a.vm.splitAlive {
 					statusDot(c, t.Success, 7)
 					ui.Text(c, tr("分流运行中 · 规则已就绪", "Routing active · rules ready")).
 						FontSize(fsCaption).TextColor(t.TextMuted)

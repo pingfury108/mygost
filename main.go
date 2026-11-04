@@ -109,6 +109,20 @@ type app struct {
 	splitBusy    bool // 分流列表更新中
 
 	saveTimer *time.Timer // 文本输入防抖，停顿后才落盘
+
+	// vm 是视图需要的派生状态，只由后台探测写（refreshViewModel），
+	// view 只读。渲染路径里不能有 exec/dial/读大文件，否则滚动会卡。
+	vm viewModel
+}
+
+// viewModel 是界面的只读快照：重操作的结果全部落在这里。
+type viewModel struct {
+	splitAlive  bool      // 分流插件端口可达
+	leftovers   []int     // 不被本会话管理的 gost 进程
+	domainCount int       // 域名规则数
+	ipCount     int       // IP 规则数
+	rulesReady  bool      // 两份规则文件均已下载
+	rulesAt     time.Time // 规则文件更新时间（取较新的一份）
 }
 
 var dataDir string
@@ -180,6 +194,9 @@ func main() {
 			go a.ensureGeo()
 		}
 		a.watchSplit()
+		// 先同步探一次，首帧就有真实状态；之后每 2 秒后台刷新
+		a.refreshViewModel()
+		a.watchViewModel()
 		a.checkBinAsync()
 		if s.AutoStart && s.Current != "" {
 			go a.doStart()

@@ -33,7 +33,7 @@ func newTestApp(t *testing.T) *app {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &app{
+	a := &app{
 		page:  "main",
 		st:    st,
 		ps:    ps,
@@ -44,10 +44,12 @@ func newTestApp(t *testing.T) *app {
 		stats: statsStore,
 		reqs:  reqlog.New(50),
 	}
+	// 视图只读派生状态（vm），渲染本身不探测；测试里同步探一次
+	a.refreshViewModel()
+	return a
 }
 
 // 视图在无窗口的 Tester 中构建，验证各页面可渲染且文本正确。
-
 func TestMainEmpty(t *testing.T) {
 	a := newTestApp(t)
 	tt := ui.NewTester(a.view, 430, 660)
@@ -558,6 +560,7 @@ func TestSplitStatusRow(t *testing.T) {
 	// 规则就绪但未连接
 	os.WriteFile(a.geoM.IPListPath(), []byte("1.0.0.0/8\n"), 0o644)
 	os.WriteFile(a.geoM.DomainListPath(), []byte("baidu.com\n"), 0o644)
+	a.refreshViewModel() // 渲染不探测，状态靠刷新
 	tt2 := ui.NewTester(a.view, 430, 1200)
 	if !tt2.HasText(tr("连接后启动", "Starts with connection")) {
 		t.Errorf("should say starts with connection, texts %q", tt2.Texts())

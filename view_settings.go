@@ -143,7 +143,7 @@ func (a *app) viewSettings(c *ui.Context) {
 				ui.Column(c).FillWidth().Gap(sp3).Children(func() {
 					settingRow(c, tr("残留进程", "Leftover processes"),
 						a.leftoverDesc(), func() {
-							if n := len(a.leftovers()); n > 0 {
+							if len(a.vm.leftovers) > 0 {
 								ui.Button(c, tr("全部结束", "Kill all")).OnClick(func() { go a.killLeftovers() })
 							}
 						})
@@ -249,14 +249,14 @@ func (a *app) listDesc(count int, at time.Time) string {
 	return fmt.Sprintf("%d 条 · %s", count, at.Format("2006-01-02 15:04"))
 }
 
-// ipListDesc 是 IP 列表行的描述文字。
+// ipListDesc 是 IP 列表行的描述文字（行数来自后台探测的 vm，不读文件）。
 func (a *app) ipListDesc() string {
-	return a.listDesc(a.geoM.CountIP(), a.geoM.UpdateAt(a.geoM.IPListPath()))
+	return a.listDesc(a.vm.ipCount, a.geoM.UpdateAt(a.geoM.IPListPath()))
 }
 
-// domainListDesc 是域名列表行的描述文字。
+// domainListDesc 是域名列表行的描述文字（行数来自 vm）。
 func (a *app) domainListDesc() string {
-	return a.listDesc(a.geoM.CountDomains(), a.geoM.UpdateAt(a.geoM.DomainListPath()))
+	return a.listDesc(a.vm.domainCount, a.geoM.UpdateAt(a.geoM.DomainListPath()))
 }
 
 // onSplitToggled 在开关变化时落盘；开启即预下载规则，保证下次连接可用。
@@ -329,9 +329,9 @@ func (a *app) leftovers() []int {
 	return out
 }
 
-// leftoverDesc 描述残留进程数量。
+// leftoverDesc 描述残留进程数量（数量来自后台探测的 vm）。
 func (a *app) leftoverDesc() string {
-	n := len(a.leftovers())
+	n := len(a.vm.leftovers)
 	if n == 0 {
 		return tr("没有残留进程", "None")
 	}
@@ -372,7 +372,7 @@ func (a *app) splitStatusRow(c *ui.Context) {
 	if st, _, _ := a.pm.State(); st == proc.Running {
 		runningGost = true
 	}
-	alive := a.geoM.Running() && portOpen(a.geoM.Addr())
+	alive := a.vm.splitAlive
 
 	dot, text := t.TextMuted, tr("未运行", "Not running")
 	switch {
@@ -382,7 +382,7 @@ func (a *app) splitStatusRow(c *ui.Context) {
 		// gost 在跑但插件不在 = 分流实际未生效，必须警告
 		dot, text = t.Danger, tr("插件未运行，分流未生效（将被自动重启）",
 			"Plugin down — routing inactive (auto-restarting)")
-	case a.geoM.Ready():
+	case a.vm.rulesReady:
 		dot, text = t.TextMuted, tr("连接后启动", "Starts with connection")
 	default:
 		dot, text = t.Warning, tr("规则未下载", "Rules not downloaded")
@@ -400,9 +400,9 @@ func (a *app) splitStatusRow(c *ui.Context) {
 	})
 }
 
-// splitCountsDesc 描述已下载的分流规则规模（域名 + IP 条数）。
+// splitCountsDesc 描述已下载的分流规则规模（数量来自后台探测的 vm）。
 func (a *app) splitCountsDesc() string {
-	n, m := a.geoM.CountDomains(), a.geoM.CountIP()
+	n, m := a.vm.domainCount, a.vm.ipCount
 	switch {
 	case n > 0 && m > 0:
 		return fmt.Sprintf(tr("%d 个域名 / %d 条 IP", "%d domains / %d IPs"), n, m)

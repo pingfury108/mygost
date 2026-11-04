@@ -20,6 +20,7 @@ func TestSettingsSplitCard(t *testing.T) {
 	}
 
 	a.sSplit = true
+	a.refreshViewModel() // 列表未下载→-1，靠刷新进 vm
 	tt2 := ui.NewTester(a.view, 430, 900)
 	if !tt2.HasText(tr("尚未下载", "Not downloaded")) {
 		t.Errorf("IP list should show not-downloaded state, texts %q", tt2.Texts())

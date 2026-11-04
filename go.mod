@@ -5,7 +5,7 @@ go 1.27.3
 tool github.com/egoist/mygo/cmd/mygo
 
 require (
-	github.com/egoist/mygo v0.6.3
+	github.com/egoist/mygo v0.7.4
 	github.com/go-gost/plugin v0.2.1
 	google.golang.org/grpc v1.65.0
 	gopkg.in/yaml.v3 v3.0.1

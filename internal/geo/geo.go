@@ -54,6 +54,17 @@ type Manager struct {
 	policy Policy
 	cmd    *exec.Cmd
 	cancel context.CancelFunc
+
+	// counts 缓存列表行数：域名表 11 万行，设置页每帧都会问一次，
+	// 每次重读文件会让滚动明显卡顿。按 mtime+size 失效。
+	counts map[string]lineCount
+}
+
+// lineCount 是一条列表文件的行数缓存。
+type lineCount struct {
+	mod  time.Time
+	size int64
+	n    int
 }
 
 // NewManager 创建管理器；dir 存放插件二进制与列表文件。
@@ -61,7 +72,10 @@ func NewManager(dir string, port int) *Manager {
 	if port <= 0 {
 		port = DefaultListenPort
 	}
-	return &Manager{dir: dir, port: port, policy: PolicyProxy}
+	return &Manager{
+		dir: dir, port: port, policy: PolicyProxy,
+		counts: make(map[string]lineCount),
+	}
 }
 
 // SetPolicy 设置未收录域名的策略（下次启动生效）。
@@ -392,10 +406,36 @@ func ParseGeositeJSON(r io.Reader) ([]string, error) {
 }
 
 // CountLines 返回文件行数（-1 表示无文件）。
+//
+// 结果按 mtime+size 缓存：列表文件是 11 万行级别，设置页每帧渲染都会问，
+// 不缓存会让滚动卡成幻灯片。文件被重写后 mtime 变化，自动失效。
 func (m *Manager) CountLines(path string) int {
 	if path == "" {
 		return -1
 	}
+	st, err := os.Stat(path)
+	if err != nil {
+		return -1
+	}
+	m.mu.Lock()
+	if c, ok := m.counts[path]; ok && c.mod.Equal(st.ModTime()) && c.size == st.Size() {
+		m.mu.Unlock()
+		return c.n
+	}
+	m.mu.Unlock()
+
+	n := countFileLines(path)
+	m.mu.Lock()
+	if m.counts == nil {
+		m.counts = make(map[string]lineCount)
+	}
+	m.counts[path] = lineCount{mod: st.ModTime(), size: st.Size(), n: n}
+	m.mu.Unlock()
+	return n
+}
+
+// countFileLines 真读文件统计有效行（非空、非注释）。
+func countFileLines(path string) int {
 	f, err := os.Open(path)
 	if err != nil {
 		return -1
@@ -403,6 +443,7 @@ func (m *Manager) CountLines(path string) int {
 	defer f.Close()
 	n := 0
 	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for sc.Scan() {
 		if s := strings.TrimSpace(sc.Text()); s != "" && !strings.HasPrefix(s, "#") {
 			n++
