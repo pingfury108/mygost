@@ -55,6 +55,11 @@ type Manager struct {
 	cmd    *exec.Cmd
 	cancel context.CancelFunc
 
+	// external 表示当前地址上的插件不是本实例拉起的（上次遗留或别的实例），
+	// 只是复用；Stop 时不应该去杀它。
+	external bool
+	lastErr  string
+
 	// counts 缓存列表行数：域名表 11 万行，设置页每帧都会问一次，
 	// 每次重读文件会让滚动明显卡顿。按 mtime+size 失效。
 	counts map[string]lineCount
@@ -122,11 +127,90 @@ func fileReady(p string) bool {
 	return err == nil && !st.IsDir() && st.Size() > 0
 }
 
-// Running 报告插件进程是否在运行。
+// Running 报告自有进程是否还在（不代表服务可用，看 Alive）。
 func (m *Manager) Running() bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.cmd != nil && m.cmd.Process != nil
+}
+
+// Alive 报告插件服务是否可用：自有进程活着，或地址上已有可用实例。
+//
+// 判定以“服务能不能用”为准，不看进程归属：app 重启后自有 cmd 是 nil，
+// 但上次遗留的 splitd 仍在监听，此时应该直接复用而不是报未运行。
+func (m *Manager) Alive() bool { return m.Running() || portReachable(m.Addr()) }
+
+// Status 是插件状态快照（供界面渲染，不做事）。
+type Status struct {
+	Alive    bool   // 服务可用
+	External bool   // 复用非本实例启动的插件
+	Addr     string // 实际监听地址
+	Err      string // 最近一次失败原因
+}
+
+// Status 返回当前状态快照。
+func (m *Manager) Status() Status {
+	m.mu.Lock()
+	ext, errStr := m.external, m.lastErr
+	m.mu.Unlock()
+	return Status{Alive: m.Alive(), External: ext, Addr: m.Addr(), Err: errStr}
+}
+
+func (m *Manager) setErr(err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err == nil {
+		m.lastErr = ""
+	} else {
+		m.lastErr = err.Error()
+	}
+}
+
+// portReachable 报告地址上是否有人在监听。
+func portReachable(addr string) bool {
+	conn, err := net.DialTimeout("tcp", addr, 300*time.Millisecond)
+	if err != nil {
+		return false
+	}
+	conn.Close()
+	return true
+}
+
+// ensurePort 确保当前端口可用：被其他程序占用时换一个空闲端口。
+//
+// 8100 是常用端口，可能被用户的其它服务占着；此时换端口而不是报错。
+func (m *Manager) ensurePort() error {
+	m.mu.Lock()
+	port := m.port
+	m.mu.Unlock()
+
+	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	if err == nil {
+		ln.Close()
+		return nil
+	}
+	// 端口被占：从 8100 往后找一个空闲的
+	free, perr := pickFreePort(8410, 60)
+	if perr != nil {
+		return fmt.Errorf("端口 %d 被占用，且找不到空闲端口: %w", port, perr)
+	}
+	m.mu.Lock()
+	m.port = free
+	m.mu.Unlock()
+	return nil
+}
+
+// pickFreePort 从 start 起找第一个可监听的端口。
+func pickFreePort(start, tries int) (int, error) {
+	for p := start; p < start+tries; p++ {
+		ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", p))
+		if err != nil {
+			continue
+		}
+		ln.Close()
+		return p, nil
+	}
+	return 0, fmt.Errorf("区间 %d-%d 无可用端口", start, start+tries)
 }
 
 // ensureInstalled 把嵌入的插件写到数据目录（幂等）。
@@ -153,6 +237,15 @@ func (m *Manager) ensureInstalled() error {
 
 // Start 启动插件（幂等）。两份列表都必须已存在。
 func (m *Manager) Start(ctx context.Context) error {
+	if err := m.start(ctx); err != nil {
+		m.setErr(err)
+		return err
+	}
+	m.setErr(nil)
+	return nil
+}
+
+func (m *Manager) start(ctx context.Context) error {
 	m.mu.Lock()
 	if m.cmd != nil && m.cmd.Process != nil {
 		m.mu.Unlock()
@@ -165,6 +258,19 @@ func (m *Manager) Start(ctx context.Context) error {
 		return fmt.Errorf("规则列表未下载")
 	}
 	if err := m.ensureInstalled(); err != nil {
+		return err
+	}
+
+	// ① 地址上已有插件（上次遗留/其他实例）→ 直接复用，避开端口碰撞
+	if portReachable(m.Addr()) {
+		m.mu.Lock()
+		m.external = true
+		m.mu.Unlock()
+		return nil
+	}
+
+	// ② 默认端口被其他程序占用 → 换一个空闲端口
+	if err := m.ensurePort(); err != nil {
 		return err
 	}
 
@@ -206,6 +312,10 @@ func (m *Manager) Start(ctx context.Context) error {
 }
 
 // Stop 停止插件进程。
+// Stop 停止插件。
+//
+// 只杀本实例拉起的进程：复用的外部实例（上次遗留/其他实例）不归我们管，
+// 杀了会误伤。要连外部实例一起停的语义由 ForceStop 提供。
 func (m *Manager) Stop() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -216,6 +326,18 @@ func (m *Manager) Stop() {
 		_ = m.cmd.Process.Kill()
 	}
 	m.cmd, m.cancel = nil, nil
+	m.external = false
+}
+
+// ForceStop 停掉本实例进程，并在地址上仍有人监听时返回错误提示。
+//
+// 用于“分流关闭”场景：插件不该继续占着端口，但外部实例需要显式清理。
+func (m *Manager) ForceStop() error {
+	m.Stop()
+	if portReachable(m.Addr()) {
+		return fmt.Errorf("端口 %s 上仍有外部插件实例", m.Addr())
+	}
+	return nil
 }
 
 // WaitReady 轮询等待插件端口可连。

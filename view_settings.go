@@ -375,13 +375,21 @@ func (a *app) splitStatusRow(c *ui.Context) {
 	alive := a.vm.splitAlive
 
 	dot, text := t.TextMuted, tr("未运行", "Not running")
+	sub := ""
 	switch {
 	case alive:
 		dot, text = t.Success, tr("插件运行中", "Plugin running")
+		sub = fmt.Sprintf("%s · %s", a.vm.splitAddr, a.splitCountsDesc())
 	case runningGost:
 		// gost 在跑但插件不在 = 分流实际未生效，必须警告
-		dot, text = t.Danger, tr("插件未运行，分流未生效（将被自动重启）",
-			"Plugin down — routing inactive (auto-restarting)")
+		dot, text = t.Danger, tr("插件未运行，分流未生效",
+			"Plugin down — routing inactive")
+		// 显示真实原因（端口占用/规则缺失/启动失败），不猜
+		if a.vm.splitErr != "" {
+			sub = a.vm.splitErr
+		} else {
+			sub = tr("正在重启…", "Restarting…")
+		}
 	case a.vm.rulesReady:
 		dot, text = t.TextMuted, tr("连接后启动", "Starts with connection")
 	default:
@@ -392,9 +400,9 @@ func (a *app) splitStatusRow(c *ui.Context) {
 		statusDot(c, dot, dotSm)
 		ui.Column(c).Grow(1).Gap(1).Children(func() {
 			ui.Text(c, text).FontSize(fsBody).TextColor(t.TextMuted)
-			if alive {
-				ui.Textf(c, "%s · %s", a.geoM.Addr(), a.splitCountsDesc()).
-					FontSize(fsCaption).Font("monospace").TextColor(t.TextMuted)
+			if sub != "" {
+				ui.Text(c, sub).FontSize(fsCaption).
+					Font("monospace").TextColor(t.TextMuted).SingleLine()
 			}
 		})
 	})

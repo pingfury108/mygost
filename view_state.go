@@ -27,7 +27,8 @@ func (a *app) probeViewModel() viewModel {
 	var vm viewModel
 
 	// 插件端口探活：TCP dial 带 syscall 与超时开销
-	vm.splitAlive = a.geoM.Running() && portOpen(a.geoM.Addr())
+	// 以“服务可用”为准（含复用的外部实例）
+	vm.splitAlive = a.geoM.Alive()
 
 	// 残留进程：pgrep 会 fork 一个进程，是这几项里最贵的
 	if all := proc.FindByConfig(filepath.Join(dataDir, "profiles")); len(all) > 0 {
@@ -36,6 +37,17 @@ func (a *app) probeViewModel() viewModel {
 			if p != cur {
 				vm.leftovers = append(vm.leftovers, p)
 			}
+		}
+	}
+
+	// 插件状态（含实际地址与最近错误，端口可能因占用而变）
+	gs := a.geoM.Status()
+	vm.splitAlive = gs.Alive
+	vm.splitAddr = gs.Addr
+	vm.splitErr = gs.Err
+	if a.splitSup != nil {
+		if e := a.splitSup.Err(); e != "" {
+			vm.splitErr = e
 		}
 	}
 

@@ -110,6 +110,9 @@ type app struct {
 
 	saveTimer *time.Timer // 文本输入防抖，停顿后才落盘
 
+	// splitSup 是分流插件的唯一管理者（启停只走它，UI 不碰）
+	splitSup *splitSupervisor
+
 	// vm 是视图需要的派生状态，只由后台探测写（refreshViewModel），
 	// view 只读。渲染路径里不能有 exec/dial/读大文件，否则滚动会卡。
 	vm viewModel
@@ -117,7 +120,9 @@ type app struct {
 
 // viewModel 是界面的只读快照：重操作的结果全部落在这里。
 type viewModel struct {
-	splitAlive  bool      // 分流插件端口可达
+	splitAlive  bool      // 分流插件服务可用（含复用的外部实例）
+	splitAddr   string    // 插件实际监听地址（8100 被占时会变）
+	splitErr    string    // 最近一次插件启动失败原因
 	leftovers   []int     // 不被本会话管理的 gost 进程
 	domainCount int       // 域名规则数
 	ipCount     int       // IP 规则数
@@ -189,11 +194,10 @@ func main() {
 		a.setupTray()
 		a.refreshTray()
 		a.setupAppMenu()
-		// 接管了上次遗留的 gost？把它的分流插件一并恢复
-		if st, _, _ := a.pm.State(); st == proc.Running && a.st.Get().Split {
-			go a.ensureGeo()
-		}
-		a.watchSplit()
+		// 分流插件由监管器统一收敛：接管了在跑的 gost 就自动补启/复用插件
+		a.splitSup = newSplitSupervisor(a)
+		go a.splitSup.Reconcile()
+		a.splitSup.Watch()
 		// 先同步探一次，首帧就有真实状态；之后每 2 秒后台刷新
 		a.refreshViewModel()
 		a.watchViewModel()
@@ -209,7 +213,11 @@ func main() {
 		// 白名单模式下降级为"全部走代理"。
 		if !a.st.Get().KeepOnExit {
 			a.pm.StopAndWait(3 * time.Second)
-			a.geoM.Stop()
+			if a.splitSup != nil {
+				a.splitSup.StopIfUnwanted()
+			} else {
+				a.geoM.Stop()
+			}
 		}
 	})
 	if err := mygo.App.Run(); err != nil {

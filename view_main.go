@@ -435,10 +435,15 @@ func (a *app) doStart() {
 		return
 	}
 
-	// 分流开启：先确保 geo 插件在运行（配置生成也会带上 bypasses）
+	// 分流开启：先确保插件就绪，拿到真实地址（8100 被占时会换端口，
+	// 配置里的 split-geo 必须指向它）
+	pluginAddr := a.geoM.Addr()
 	if s.Split {
-		if err := a.ensureGeo(); err != nil {
-			a.toast("分流不可用，按无分流启动: "+err.Error(), "error")
+		addr, err := a.ensureGeo()
+		if err != nil {
+			a.toast(tr("分流不可用，按无分流启动: ", "Routing unavailable, starting without it: ")+err.Error(), "error")
+		} else if addr != "" {
+			pluginAddr = addr
 		}
 	}
 
@@ -492,7 +497,7 @@ func (a *app) doStart() {
 	// 运行前按当前分流开关重写 yml（保存时的开关可能已变）
 	if p := a.ps.Get(id); p != nil {
 		sc := profiles.SplitConfig{
-			Enabled: s.Split, PluginAddr: a.geoM.Addr(),
+			Enabled: s.Split, PluginAddr: pluginAddr,
 			PrivateMatchers: geo.PrivateMatchers, MetricsAddr: metricsAddr,
 			// 请求决策只有 debug 级日志才有；设置里可关闭以省开销
 			DebugLog: s.RequestLog,
@@ -621,72 +626,18 @@ func (a *app) stopGost() {
 	a.clearPid()
 	a.stopMetrics()
 	// 插件跟随 gost：gost 停了就不再需要它
-	a.geoM.Stop()
+	a.splitSup.StopIfUnwanted()
+	a.refreshViewModel()
 }
 
-// watchSplit 守护插件与 gost 的绑定关系：
-// gost 在运行且分流开启时，插件必须在运行；不在就自动补启。
+// ensureGeo 确保分流插件运行且规则就绪；返回实际监听地址。
 //
-// 这样无论插件是被 app 退出、崩溃还是被手动 kill 掉的，都会自愈。
-func (a *app) watchSplit() {
-	go func() {
-		t := time.NewTicker(5 * time.Second)
-		defer t.Stop()
-		for range t.C {
-			if a.win == nil || a.win.IsDestroyed() {
-				return
-			}
-			if st, _, _ := a.pm.State(); st != proc.Running {
-				continue
-			}
-			if !a.st.Get().Split {
-				continue
-			}
-			if a.geoM.Running() && portOpen(a.geoM.Addr()) {
-				continue
-			}
-			log.Printf("分流插件未运行，自动补启")
-			if err := a.ensureGeo(); err != nil {
-				log.Printf("补启分流插件失败: %v", err)
-			}
-			a.win.Update(func() { a.refreshTray() })
-		}
-	}()
-}
-
-// portOpen 报告 addr 是否可连（判断插件是否真的在工作）。
-func portOpen(addr string) bool {
-	c, err := net.DialTimeout("tcp", addr, 400*time.Millisecond)
-	if err != nil {
-		return false
-	}
-	c.Close()
-	return true
-}
-
-// ensureGeo 确保分流插件运行且规则就绪；规则缺失时自动下载。
-func (a *app) ensureGeo() error {
+// 具体启停由 splitSupervisor 负责（见 split_supervisor.go）；这里只是
+// 给“启动 gost 之前”用的薄封装，因为配置里的 split-geo 需要真实地址。
+func (a *app) ensureGeo() (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-
-	st := a.st.Get()
-	if a.geoM.CountIP() <= 0 {
-		if _, err := a.geoM.UpdateIPList(ctx, st.SplitIPListURL); err != nil {
-			return fmt.Errorf("更新 IP 列表失败: %w", err)
-		}
-	}
-	if a.geoM.CountDomains() <= 0 {
-		if _, err := a.geoM.UpdateDomainList(ctx, st.SplitDomainListURL); err != nil {
-			return fmt.Errorf("更新域名列表失败: %w", err)
-		}
-	}
-	if a.geoM.Running() {
-		return nil // 已在运行；规则文件热加载由 gost reload 处理
-	}
-	if err := a.geoM.Start(ctx); err != nil {
-		return err
-	}
-	return a.geoM.WaitReady(ctx, 10*time.Second)
+	return a.splitSup.Ensure(ctx)
 }
 
 // doDownload 后台下载 gost。
