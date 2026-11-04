@@ -50,15 +50,16 @@ type Entry struct {
 	Err      string        // 失败原因
 }
 
-// Log 保存最近的请求记录（环形缓冲）。
+// Log 保存最近的请求记录（环形缓冲）并落盘。
 type Log struct {
-	mu   sync.Mutex
-	buf  []Entry
-	next int
-	full bool
-	sids map[string]int // sid → 下标，用于把 route 行补进同一条
-	on   bool
-	now  func() time.Time
+	mu    sync.Mutex
+	buf   []Entry
+	next  int
+	full  bool
+	sids  map[string]int // sid → 下标，用于把 route 行补进同一条
+	on    bool
+	now   func() time.Time
+	store *Store // 持久化；nil 表示不落盘
 }
 
 // New 创建记录器；capacity<=0 时用 500。
@@ -72,6 +73,46 @@ func New(capacity int) *Log {
 		on:   true,
 		now:  time.Now,
 	}
+}
+
+// SetStore 挂上持久化后端；nil 表示只留内存。
+func (l *Log) SetStore(s *Store) {
+	if l == nil {
+		return
+	}
+	l.mu.Lock()
+	l.store = s
+	l.mu.Unlock()
+}
+
+// Flush 把当前记录写入磁盘（退出、切天、定时器调用）。
+func (l *Log) Flush() {
+	if l == nil {
+		return
+	}
+	entries := l.Entries(0)
+	s := l.storeRef()
+	if s == nil {
+		return
+	}
+	for _, e := range entries {
+		s.Append(e)
+	}
+	s.Flush()
+}
+
+// Store 返回持久化后端（可能为 nil）。
+func (l *Log) Store() *Store {
+	if l == nil {
+		return nil
+	}
+	return l.storeRef()
+}
+
+func (l *Log) storeRef() *Store {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.store
 }
 
 // SetEnabled 开关解析：关闭后不再产生记录（原始日志不受影响）。

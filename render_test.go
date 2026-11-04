@@ -10,6 +10,7 @@ import (
 	"github.com/egoist/mygo/ui"
 	"mygost/internal/metrics"
 	"mygost/internal/profiles"
+	"mygost/internal/reqlog"
 	"mygost/internal/settings"
 )
 
@@ -96,6 +97,17 @@ func TestRenderPages(t *testing.T) {
 	a.reqs.Feed(`{"time":"2026-11-03T21:14:33.100+08:00","level":"debug","msg":"proxy 149.129.41.181:8081","kind":"handler","sid":"a3"}`)
 	a.reqs.Feed(`{"time":"2026-11-03T21:14:33.102+08:00","level":"debug","msg":"route(retry=0) dial tcp 149.129.41.181:8081: connect: connection refused","kind":"handler","sid":"a3"}`)
 	render("p_requests")
+
+	// 日期选择行：造几天历史文件后渲染
+	if st := a.reqs.Store(); st != nil {
+		for i := 0; i < 3; i++ {
+			at := time.Now().AddDate(0, 0, -i)
+			st.Append(reqlog.Entry{At: at, Target: "hist.example.com:443",
+				SID: "h" + fmt.Sprint(i), Decision: reqlog.Proxied})
+		}
+		st.Flush()
+	}
+	render("p_requests_day")
 	a.startNew()
 	a.formKind = 2 // YAML 标签
 	a.syncFormKind()

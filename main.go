@@ -60,8 +60,9 @@ type app struct {
 	fwdTargets []string // 端口转发表单：目标行（每行一个地址）
 
 	// 日志页
-	logView       int  // 0=原始 1=请求
-	reqOnlyFailed bool // 请求视图：只看失败
+	logView       int    // 0=原始 1=请求
+	reqDay        string // 请求视图看哪一天（空=实时，否则 YYYY-MM-DD）
+	reqOnlyFailed bool   // 请求视图：只看失败
 	reqs          *reqlog.Log
 
 	logFilter string
@@ -209,6 +210,8 @@ func main() {
 		a.splitSup = newSplitSupervisor(a)
 		go a.splitSup.Reconcile()
 		a.splitSup.Watch()
+		// 请求记录定期落盘（解析在跟，不能靠退出时才写）
+		a.watchRequests()
 		// 先同步探一次，首帧就有真实状态；之后每 2 秒后台刷新
 		a.refreshViewModel()
 		a.watchViewModel()
@@ -219,6 +222,7 @@ func main() {
 	})
 	mygo.App.OnBeforeQuit(func(e *mygo.QuitEvent) {
 		a.quitting = true // 放行 OnClose 的窗口隐藏拦截
+		a.flushRequests() // 请求记录落盘并关闭
 		// 插件跟随 gost：gost 保留时插件也必须保留，
 		// 否则 gost 的 split-geo 会指向一个无人监听的端口，
 		// 白名单模式下降级为"全部走代理"。
@@ -266,6 +270,7 @@ func newApp() *app {
 		msp:       metrics.NewSpeed(5),
 	}
 	a.reqs = reqlog.New(500)
+	a.initRequestStore(filepath.Join(dataDir, "requests"))
 	a.pm = proc.NewManager(a.onProcEvent)
 	a.pm.SetOnLine(a.feedRequest)
 	statsStore, err := metrics.LoadStore(dataDir)

@@ -19,7 +19,7 @@ func (a *app) logViewTabs(c *ui.Context) {
 // viewRequests 是日志页的「请求」视图：每个请求一行，含去向与失败原因。
 func (a *app) viewRequests(c *ui.Context) {
 	t := c.Theme()
-	entries := a.reqs.Entries(0)
+	entries := a.requestEntries()
 	if q := strings.TrimSpace(a.logFilter); q != "" {
 		kept := entries[:0:0]
 		for _, e := range entries {
@@ -62,6 +62,9 @@ func (a *app) viewRequests(c *ui.Context) {
 	ui.Column(c).Fill().Padding(sp4).Gap(sp3).Children(func() {
 		// 视图切换（共用，保证能切回原始日志）
 		a.logViewTabs(c)
+
+		// 日期选择：实时 / 过去若干天（记录保留 7 天）
+		a.requestDayRow(c)
 
 		// 工具栏：搜索 + 仅失败胶囊 + 复制描边按钮 + ⋯ 菜单
 		ui.Row(c).FillWidth().Gap(sp2).AlignItems(ui.Center).Children(func() {
@@ -193,21 +196,6 @@ func (a *app) requestRow(c *ui.Context, e reqlog.Entry) {
 // requestCount 返回请求条数（用于日志页标签）。
 func (a *app) requestCount() int { return a.reqs.Len() }
 
-// feedRequest 把一行原始日志喂给请求解析器（由 proc 的日志回调调用）。
-func (a *app) feedRequest(line string) {
-	if a.reqs == nil {
-		return
-	}
-	before := a.reqs.Len()
-	a.reqs.Feed(line)
-	if a.reqs.Len() != before {
-		// 有新请求：让界面刷新（节流由 proc 的 notifySoon 负责）
-		if a.win != nil {
-			a.win.Invalidate()
-		}
-	}
-}
-
 // formatLatency 把延迟格式化（当前未从日志采集，保留给后续扩展）。
 func formatLatency(d time.Duration) string {
 	if d <= 0 {
@@ -217,3 +205,60 @@ func formatLatency(d time.Duration) string {
 }
 
 var _ = proc.Running
+
+// requestEntries 返回当前要显示的记录：实时取内存，历史取某天的落盘文件。
+//
+// 这里只读：解析在 internal/reqlog，落盘在 request_feed.go。
+func (a *app) requestEntries() []reqlog.Entry {
+	if a.reqDay == "" {
+		return a.reqs.Entries(0)
+	}
+	st := a.reqs.Store()
+	if st == nil {
+		return nil
+	}
+	es, err := st.Load(a.reqDay)
+	if err != nil {
+		return nil
+	}
+	return es
+}
+
+// requestDayRow 是请求视图的日期切换行。
+//
+// 即使没有持久化（store 为 nil）也渲染：布局保持一致，
+// 只是历史选项为空。
+func (a *app) requestDayRow(c *ui.Context) {
+	t := c.Theme()
+	live := tr("实时", "Live")
+	opts := []string{live}
+	var st *reqlog.Store
+	if a.reqs != nil {
+		st = a.reqs.Store()
+	}
+	if st != nil {
+		opts = append(opts, st.Days()...)
+	}
+
+	sel := live
+	if a.reqDay != "" {
+		sel = a.reqDay
+	}
+	if ui.Select(c, &sel, opts).Label(tr("查看", "View")).Changed() {
+		if sel == live {
+			a.reqDay = ""
+		} else {
+			a.reqDay = sel
+		}
+	}
+
+	// 当天达到上限时提示（debug 日志可能很密）
+	if st != nil && a.reqDay == "" {
+		today := time.Now().Format("2006-01-02")
+		if n := st.DayCount(today); n >= st.Limit() {
+			ui.Textf(c, tr("今日记录已达上限 %d 条，后续请求不再保存",
+				"Daily cap %d reached, further requests are not stored"), st.Limit()).
+				FontSize(fsCaption).TextColor(t.Warning)
+		}
+	}
+}

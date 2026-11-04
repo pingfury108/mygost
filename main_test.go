@@ -46,6 +46,8 @@ func newTestApp(t *testing.T) *app {
 	}
 	// 视图只读派生状态（vm），渲染本身不探测；测试里同步探一次
 	a.refreshViewModel()
+	// 请求记录持久化（临时目录，不碰真实数据）
+	a.initRequestStore(t.TempDir())
 	return a
 }
 
