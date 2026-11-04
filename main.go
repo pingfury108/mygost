@@ -132,6 +132,17 @@ type viewModel struct {
 
 var dataDir string
 
+// dataDirName 返回数据目录名：开发版加 -dev 后缀，与正式版完全隔离。
+//
+// 两边各自持有自己的 gost 二进制、分流规则、PID 文件与配置，
+// 所以 dev 里断开/退出/清理残留都只会影响 dev 自己。
+func dataDirName() string {
+	if mygo.IsDev() {
+		return "mygost-dev"
+	}
+	return "mygost"
+}
+
 func main() {
 	if !mygo.App.RequestSingleInstanceLock() {
 		return
@@ -232,7 +243,9 @@ func newApp() *app {
 		home, _ := os.UserHomeDir()
 		base = filepath.Join(home, ".config")
 	}
-	dataDir = filepath.Join(base, "mygost")
+	// 开发版与正式版用不同数据目录：两者各自的 gost/插件/配置互不干扰，
+	// 否则 dev 启动的实例会接管（或误杀）正式版在跑的进程。
+	dataDir = filepath.Join(base, dataDirName())
 
 	st, err := settings.Load(dataDir)
 	if err != nil {

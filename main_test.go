@@ -566,3 +566,20 @@ func TestSplitStatusRow(t *testing.T) {
 		t.Errorf("should say starts with connection, texts %q", tt2.Texts())
 	}
 }
+
+// 开发版与正式版必须用不同数据目录：否则 dev 会接管/误杀正式版的进程，
+// 两边的配置、gost 二进制、分流规则也会互相踩。
+func TestDataDirSeparatedFromProduction(t *testing.T) {
+	got := dataDirName()
+	want := "mygost"
+	if mygo.IsDev() {
+		want = "mygost-dev"
+	}
+	if got != want {
+		t.Errorf("dataDirName() = %q, want %q", got, want)
+	}
+	// 开发版绝不能落到正式目录
+	if mygo.IsDev() && got == "mygost" {
+		t.Error("开发版不能与正式版共用数据目录")
+	}
+}
