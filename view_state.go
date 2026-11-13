@@ -2,6 +2,7 @@ package main
 
 import (
 	"path/filepath"
+	"runtime"
 	"time"
 
 	"mygost/internal/geo"
@@ -18,8 +19,16 @@ import (
 // 字段，零 syscall。
 
 // refreshInterval 是后台探测周期。2 秒足以让状态看起来实时，
-// 又不会让 pgrep/dial 的代价落到渲染上。
-const refreshInterval = 2 * time.Second
+// 又不会让探测的代价落到渲染上。
+//
+// Windows 上探测含 Toolhelp32 全表枚举（约几十 ms）且没有 pgrep 这种
+// 轻量工具，周期放宽；macOS/Linux 上 pgrep 是毫秒级，保持 2 秒。
+var refreshInterval = func() time.Duration {
+	if runtime.GOOS == "windows" {
+		return 5 * time.Second
+	}
+	return 2 * time.Second
+}()
 
 // probeViewModel 执行一次探测，返回快照。纯计算，不碰 UI 状态，
 // 因此可安全地在后台 goroutine 里跑。

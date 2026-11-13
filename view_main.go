@@ -649,7 +649,9 @@ func (a *app) doDownload() {
 	a.win.Update(func() {
 		a.dlBusy = false
 		if err != nil {
-			a.pendingToasts = append(a.pendingToasts, ui.Toast{Title: "下载失败: " + err.Error(), Type: "error"})
+			a.pendingToasts = append(a.pendingToasts, ui.Toast{
+				Title: "下载失败: " + gostbin.ExplainError(err, a.st.Get().Mirror),
+				Type:  "error"})
 			return
 		}
 		a.pendingToasts = append(a.pendingToasts, ui.Toast{Title: "下载完成", Type: "success"})

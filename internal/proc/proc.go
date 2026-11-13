@@ -255,11 +255,22 @@ func (m *Manager) stopAsync() error {
 	}
 	m.manual = true
 	cmd := m.cmd
+	pid := extPIDOf(cmd)
 	m.mu.Unlock()
 	m.pushLine("→ 收到停止请求")
-	terminate(cmd)
-	// watch goroutine 负责置为 Stopped
+	if stopManaged(cmd, pid) {
+		// watch goroutine 负责置为 Stopped
+		return nil
+	}
 	return nil
+}
+
+// extPIDOf 返回 cmd 对应的 pid（0 表示未知）。
+func extPIDOf(cmd *exec.Cmd) int {
+	if cmd == nil || cmd.Process == nil {
+		return 0
+	}
+	return cmd.Process.Pid
 }
 
 // Restart 停止后重新启动（同一配置）。
@@ -470,22 +481,34 @@ func (m *Manager) notifySoon() {
 	})
 }
 
-// terminate 平台相关的终止逻辑。
-func terminate(cmd *exec.Cmd) {
-	if cmd.Process == nil {
-		return
+// stopManaged 平台相关的停止逻辑：先优雅（信号/CTRL_BREAK），
+// 平台实现内部等待并按需强杀。返回 true 表示进程已确认退出。
+func stopManaged(cmd *exec.Cmd, pid int) bool {
+	if cmd == nil || cmd.Process == nil {
+		return true
 	}
 	if runtime.GOOS == "windows" {
-		cmd.Process.Kill()
-		return
+		return stopGostGraceful(pid, 2*time.Second)
 	}
 	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
 		cmd.Process.Kill()
-		return
+		return true
 	}
-	go func() {
-		time.Sleep(2 * time.Second)
-		// 仍未退出则强杀（Kill 已退出进程返回错误，忽略）
-		cmd.Process.Kill()
-	}()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if !runningPidAlive(pid) {
+			return true
+		}
+		time.Sleep(30 * time.Millisecond)
+	}
+	cmd.Process.Kill()
+	return true
+}
+
+// runningPidAlive 报告 pid 是否仍存活（unix 用信号 0 探测）。
+func runningPidAlive(pid int) bool {
+	if pid <= 0 {
+		return true
+	}
+	return ProcessAlive(pid)
 }

@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -167,12 +168,23 @@ func checksumOK(sums, name, want string) bool {
 	return false
 }
 
-func httpGet(ctx context.Context, url string, onProgress Progress) ([]byte, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+func httpGet(ctx context.Context, rawURL string, onProgress Progress) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return nil, err
 	}
-	client := &http.Client{Timeout: 10 * time.Minute}
+	req.Header.Set("User-Agent", "mygost/"+DefaultVersion)
+
+	// 代理感知：Windows 用户常靠系统代理上网，但 Go 的默认传输
+	// 在 Windows 上不读系统设置，只认环境变量。这里显式接上系统代理，
+	// 否则国内用户直连 GitHub 下载几乎必败。
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	if p := systemProxy(); p != "" {
+		if pu, pe := url.Parse(p); pe == nil {
+			transport.Proxy = func(*http.Request) (*url.URL, error) { return pu, nil }
+		}
+	}
+	client := &http.Client{Timeout: 10 * time.Minute, Transport: transport}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
@@ -249,4 +261,36 @@ func extractBinary(data []byte, isZip bool) ([]byte, error) {
 		}
 	}
 	return nil, fmt.Errorf("压缩包中未找到 gost")
+}
+
+// ExplainError 把下载错误翻译成用户能行动的提示。
+//
+// Windows 上最常见的是"直连 GitHub 不可达"与"系统代理没被读到的焦虑"，
+// 这两类错误原文（dial tcp ... i/o timeout）对用户毫无帮助。
+func ExplainError(err error, mirror string) string {
+	if err == nil {
+		return ""
+	}
+	msg := err.Error()
+	lower := strings.ToLower(msg)
+	switch {
+	case strings.Contains(lower, "i/o timeout"), strings.Contains(lower, "deadline exceeded"):
+		return msg + "\n\n网络超时。若身处境内，GitHub 通常无法直连：" +
+			"请在设置里填写镜像地址（支持 {version} {os} {arch} {ext} 变量），" +
+			"或先开启系统代理后重试。"
+	case strings.Contains(lower, "no such host"), strings.Contains(lower, "server misbehaving"):
+		return msg + "\n\n域名解析失败。检查网络与 DNS，或改用镜像地址。"
+	case strings.Contains(lower, "connection refused"), strings.Contains(lower, "connection reset"):
+		return msg + "\n\n连接被拒绝/重置。若正在用代理，确认代理端口可用；" +
+			"也可以改用镜像地址。"
+	case strings.Contains(lower, "sha256"):
+		return msg + "\n\n下载内容校验不通过（可能被中间代理篡改或镜像不完整），" +
+			"请更换镜像重试。"
+	case strings.Contains(lower, "http 404"), strings.Contains(lower, "http 403"):
+		return msg + "\n\n镜像地址可能不对。默认镜像为 " + DefaultMirror
+	}
+	if mirror == "" {
+		return msg
+	}
+	return msg
 }
