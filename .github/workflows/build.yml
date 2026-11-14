@@ -21,6 +21,14 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+
+      # 二进制不入库（见 .gitignore），不生成的话 //go:embed 目标
+      # 缺失、相关包无法编译，嵌入类断言也会被跳过。
+      # fetch-deps.sh 只下载 gost 官方压缩包 + 交叉编译 splitd，
+      # 与构建 job 用的是同一套产物。
+      - name: 准备嵌入依赖
+        run: ./tools/fetch-deps.sh
+
       - run: go vet ./...
       - run: CGO_ENABLED=0 go test ./...
 

@@ -271,19 +271,23 @@ func (m *Manager) start(ctx context.Context) error {
 	policy := m.policy
 	m.mu.Unlock()
 
-	if !m.Ready() {
-		return fmt.Errorf("规则列表未下载")
-	}
-	if err := m.ensureInstalled(); err != nil {
-		return err
-	}
-
-	// ① 地址上已有插件（上次遗留/其他实例）→ 直接复用，避开端口碰撞
+	// ① 地址上已有插件（上次遗留/其他实例）→ 直接复用。
+	//
+	// 这一步必须在前：实例已经在跑，说明它自己已持有规则与二进制，
+	// 我们无需下载规则也无需解压本地副本（CI 环境根本没有嵌入包，
+	// 以前会在这里误报“插件未嵌入”）。
 	if portReachable(m.Addr()) {
 		m.mu.Lock()
 		m.external = true
 		m.mu.Unlock()
 		return nil
+	}
+
+	if !m.Ready() {
+		return fmt.Errorf("规则列表未下载")
+	}
+	if err := m.ensureInstalled(); err != nil {
+		return err
 	}
 
 	// ② 默认端口被其他程序占用 → 换一个空闲端口
