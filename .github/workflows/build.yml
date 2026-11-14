@@ -108,14 +108,22 @@ jobs:
       - name: 列出待发布文件
         run: ls -la dist
 
+      - name: 扁平化产物
+        run: |
+          # artifact 保留了 build/ 下的子目录（darwin-amd64/ 等），
+          # 汇总到 flat/ 再上传，否则 gh release 会把目录当附件
+          mkdir -p flat
+          find dist -type f \( -name '*.dmg' -o -name '*.exe' \) -exec cp {} flat/ \;
+          ls -la flat
+
       - name: 创建或更新 Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           tag="$GITHUB_REF_NAME"
           if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release upload "$tag" dist/* --repo "$GITHUB_REPOSITORY" --clobber
+            gh release upload "$tag" flat/* --repo "$GITHUB_REPOSITORY" --clobber
           else
-            gh release create "$tag" dist/* --repo "$GITHUB_REPOSITORY" \
+            gh release create "$tag" flat/* --repo "$GITHUB_REPOSITORY" \
               --title "$tag" --generate-notes
           fi
