@@ -313,3 +313,6 @@ func (a *app) toast(title, typ string) {
 		a.pendingToasts = append(a.pendingToasts, ui.Toast{Title: title, Type: typ})
 	})
 }
+
+// appVersion 是应用版本，与 mygo.json 保持一致（发布时同步修改）。
+const appVersion = "0.2.0"

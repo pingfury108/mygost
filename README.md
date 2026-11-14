@@ -83,7 +83,7 @@ go build -tags embedded -o build/mygost
 ```bash
 go tool mygo build -platform "darwin/amd64,darwin/arm64,windows/amd64"
 ```
-产物在 `build/<os>-<arch>/`：macOS 为 `mygost 0.1.0 <arch>.dmg`，Windows 为 `mygost Setup 0.1.0 amd64.exe`。
+产物在 `build/<os>-<arch>/`：macOS 为 `mygost 0.2.0 <arch>.dmg`，Windows 为 `mygost Setup 0.2.0 amd64.exe`。
 
 CI（`.github/workflows/build.yml`）：
 

@@ -154,7 +154,7 @@ func (a *app) viewSettings(c *ui.Context) {
 			sectionHeader(c, tr("关于", "About"))
 			card(c).Children(func() {
 				ui.Column(c).FillWidth().Gap(sp2).Children(func() {
-					kvRow(c, "应用", "mygost 0.1.0 · gost 桌面客户端")
+					kvRow(c, tr("应用", "App"), "mygost "+appVersion+" · "+tr("gost 桌面客户端", "gost desktop client"))
 					kvRow(c, "数据目录", dataDir)
 					if a.stats != nil {
 						tod, tot := a.stats.Today(), a.stats.Total()
