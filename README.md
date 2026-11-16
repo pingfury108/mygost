@@ -2,7 +2,7 @@
 
 [gost](https://github.com/go-gost/gost) 的桌面客户端。纯 Go 原生 UI（[MyGo](https://mygo.egoist.dev)，无 webview），管理本机 gost 进程。
 
-![mygost](https://souk.pingfury.top/media/shots/mygost/c19615c7.jpg)
+<img src="docs/screenshot.png" width="380" alt="mygost 主界面">
 
 ## 功能
 
