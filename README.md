@@ -1,123 +1,84 @@
 # mygost
 
-[gost](https://github.com/go-gost/gost) 的桌面客户端，基于 [MyGo](https://mygo.egoist.dev) 原生 UI（纯 Go、GPU 绘制、无 webview）。管理本机 gost 进程：配置档、启动/停止/重启、日志。
+[gost](https://github.com/go-gost/gost) 的桌面客户端。纯 Go 原生 UI（[MyGo](https://mygo.egoist.dev)，无 webview），管理本机 gost 进程。
+
+![mygost](https://souk.pingfury.top/media/shots/mygost/c19615c7.jpg)
 
 ## 功能
 
-- **配置档**：三种类型
-  - 代理（http / socks5 / relay，可选认证、可选上游转发链）—— 表单生成 gost.yml
-  - 端口转发（tcp / udp，多目标 = 负载均衡）—— 表单生成
-  - 自定义 YAML —— 内置 Zed 级代码编辑器，YAML 高亮，完整 gost 能力
-- **启停控制**：启动 / 停止（SIGTERM，2s 后强杀）/ 重启，运行时长，异常退出原因展示
-- **日志**：环形缓冲保留最近 5000 行，关键词过滤、复制、清空
-- **托盘**：图标反映运行状态（实心=运行，空心=停止），菜单快速启停
-- **gost 管理**：自动从 GitHub Releases 下载（sha256 校验），支持自定义镜像模板与本地路径；可选嵌入构建
-- 其他：单实例、开机自启、启动自动运行、退出时保持 gost 运行
+**配置** — 三种类型，表单直接生成 gost.yml：
 
-## 分流（国内直连）
+| 类型 | 说明 |
+|---|---|
+| 代理 | http / socks5 / relay，可选认证与上游转发链（任意 connector） |
+| 端口转发 | tcp / udp，多目标即负载均衡 |
+| 自定义 YAML | 内置代码编辑器，完整 gost 能力 |
 
-设置页开启「国内直连」后：
+**运行** — 一键连接当前配置，实时速率与本次会话流量；停止走优雅信号（2s 后强杀），异常退出原因直接显示；托盘图标反映状态，可快速切换配置。
 
-- **gost-geo-plugin 已嵌入 app**，无需用户安装：首次启用时自动从内嵌副本解压到
-  `~/Library/Application Support/mygost/geo/` 并启动（Windows 为 `%APPDATA%`）
-- 国内 IP 列表在运行时下载（默认 Loyalsoldier `geoip/text/cn.txt`，约 1 万条），
-  可在设置里手动更新
-- 生成的分流规则：私网段 + 国内 IP 直连，其余走转发链
+**分流** — 开启「国内直连」后按主流客户端方式分层判定：IP 查 CN IP 表，域名查 CN 域名表（11 万条后缀），未收录默认走代理。直连由本机解析（就近 CDN），代理由上游解析（避开 DNS 污染）。
 
-构建前生成嵌入用的插件（各平台交叉编译，二进制不入库）：
+**请求记录** — 每个请求的去向（直连 / 代理 / 失败）、节点与失败原因；按天落盘，保留 7 天，可回看历史。
 
-```bash
-./tools/fetch-deps.sh
-go tool mygo build
-```
+**连通性测试** — 只走当前配置的本地代理端口，不受系统代理与环境变量影响。
 
-升级插件版本：改 `tools/fetch-deps.sh` 里的版本号后重新执行即可。
+**日志** — 环形缓冲、关键词过滤、原始日志与请求视图切换。
+
+## 开箱即用
+
+安装包已内置 gost 与分流插件，无需额外安装。首次启动自动解压到数据目录；也可在设置里手动指定 gost 路径或下载指定版本（sha256 校验，支持镜像模板与系统代理）。
+
+## 安装
+
+从 [Releases](https://github.com/pingfury108/mygost/releases) 下载：
+
+- macOS：`mygost-<version>-arm64.dmg`（Apple Silicon）或 `-amd64.dmg`（Intel）
+- Windows：`mygost-setup-<version>-amd64.exe`
+
+> macOS 产物为 ad-hoc 签名、未公证，首次打开需在「系统设置 → 隐私与安全性」里放行。
 
 ## 开发
 
 ```bash
-go tool mygo dev      # 运行（改动 .go 自动重启）
+./tools/fetch-deps.sh   # 生成要嵌入的 gost 与分流插件（二进制不入库）
+go tool mygo dev        # 运行，改 .go 自动重启
 CGO_ENABLED=0 go test ./...
 go tool mygo vet .
-go tool mygo build    # 打包到 build/
 ```
 
-## gost 与 geo 插件的来源
-
-构建时**同时内置** gost（3.3.1，压缩包形式）与 gost-geo-plugin，用户装好 app 即开箱可用。
-两者都由 `tools/fetch-deps.sh` 生成（按平台交叉编译/下载，二进制不入库）：
-
-```bash
-./tools/fetch-deps.sh   # → internal/gostbin/gost_<os>_<arch>.*, internal/geobin/...
-go tool mygo build
-```
-
-gost 的查找顺序（`internal/gostbin`）：
-
-1. 设置中手动指定的路径
-2. **已下载副本**（`bin/gost`，用户点过「下载/更新」）
-3. **内置副本**（首次运行时从内嵌压缩包解压到 `bin/embedded/`）
-4. 系统 `PATH`
-5. 都没有时提示下载（默认 GitHub Releases，可在设置改镜像模板，支持 `{version} {os} {arch} {ext}`）
-
-> 已下载副本优先于内置版本，否则「下载/更新」永远不会生效。
-
-体积参考：内置 gost 压缩包 ~17MB/平台，geo 插件 ~18MB/平台，app 相比纯源码构建大约多 35MB。
-
-## 嵌入构建（可选）
-
-默认构建不嵌入 gost（体积小）。要开箱即用，先放对应平台的 gost 二进制到
-`internal/gostbin/gost`，再带 `embedded` tag 构建：
-
-```bash
-# 示例：macOS arm64
-curl -L https://github.com/go-gost/gost/releases/download/v3.3.1/gost_3.3.1_darwin_arm64.tar.gz \
-  | tar -xzO gost > internal/gostbin/gost
-go build -tags embedded -o build/mygost
-```
-
-## 构建与发布
-
-本地打包：
+打包：
 
 ```bash
 go tool mygo build -platform "darwin/amd64,darwin/arm64,windows/amd64"
 ```
-产物在 `build/<os>-<arch>/`：macOS 为 `mygost 0.2.0 <arch>.dmg`，Windows 为 `mygost Setup 0.2.0 amd64.exe`。
 
-CI（`.github/workflows/build.yml`）：
+产物在 `build/<os>-<arch>/`。推 tag `v*` 会触发 CI：测试 → 构建三平台 → 建 Release 上传安装包。发布前把 `mygo.json` 的 `version` 改成与 tag 一致。
 
-| 触发 | 行为 |
+## 数据目录
+
+| 平台 | 路径 |
 |---|---|
-| 推 tag `v*` | 测试 → 构建 macOS（Intel/Apple Silicon 各一个 dmg）+ Windows 安装包 → 创建 Release 并附上文件 |
-| 手动 Run workflow | 只构建，产物在 Actions 的 Artifacts |
+| macOS | `~/Library/Application Support/mygost` |
+| Windows | `%APPDATA%\mygost` |
 
-发布前把 `mygo.json` 的 `version` 改成与 tag 一致（如 `0.2.0` → `v0.2.0`）。
-
-> macOS 产物默认是 ad-hoc 签名、未公证，别的机器上首次打开会被 Gatekeeper 拦截。
-> 要正式分发，需在 workflow 的 macOS job 里导入 Developer ID 证书并在 `mygo.json` 配置
-> `macos.signingIdentity` / `macos.notarize`（见 mygo 文档 distribution.md、github-actions.md）。
-
+开发版（`mygo dev`）自动用 `mygost-dev`，与正式版完全隔离（配置、进程、规则各管各的）。
 
 ## 目录结构
 
 ```
-main.go               应用状态、窗口（430×660 窄窗口）、生命周期
-app_view.go           根视图（主界面 + 推入式子页）+ 设计系统组件
-view_main.go          主界面：连接大按钮、配置列表、互斥启停
-view_profiles.go      新建/编辑表单（代理 / 端口转发 / YAML）
-view_logs.go          日志
-view_settings.go      设置
-tray.go               托盘图标与菜单（与 app 图标同一标记）
-theme.go              设计 token（间距/圆角/字号）、主题派生、语义柔色
-tools/icongen/        图标生成器：go run tools/icongen/main.go
-internal/settings/    设置持久化（JSON）
+main.go               应用状态、窗口、生命周期
+view_*.go             各页面（只读渲染）
+theme.go              设计 token 与主题
+split_supervisor.go   分流插件的唯一管理者
+view_state.go         后台探测 → 视图状态（渲染路径零 syscall）
+request_feed.go       日志解析接线与落盘
+internal/proc/        gost 子进程托管、进程识别（跨平台）
 internal/profiles/    配置档存储 + gost.yml 生成
-internal/gostbin/     二进制定位、下载、（可选）嵌入
-internal/proc/        gost 子进程托管 + 日志环形缓冲
+internal/gostbin/     gost 定位、下载、嵌入
+internal/splitd/      分流判定引擎 + gRPC 插件
+internal/reqlog/      请求记录解析与按天持久化
+internal/metrics/     Prometheus 抓取、速率、按天流量
+internal/probe/       连通性测试
+cmd/splitd/           分流插件可执行程序
+tools/fetch-deps.sh   生成嵌入用的 gost 与 splitd
 ```
-
-界面为 OpenVPN Connect 式窄窗口：顶部大连接按钮（一次只运行一个配置），
-中部配置列表（行内连接/断开，⋯ 菜单编辑/删除），底部日志/设置入口。
-
-数据目录：`os.UserConfigDir()/mygost`（macOS `~/Library/Application Support/mygost`）。
