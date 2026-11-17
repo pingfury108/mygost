@@ -20,6 +20,7 @@ import (
 	"sync"
 	"time"
 
+	"mygost/internal/proc"
 	"mygost/internal/profiles"
 	"mygost/internal/splitbin"
 )
@@ -299,12 +300,14 @@ func (m *Manager) start(ctx context.Context) error {
 	// 一返回就会把插件杀掉（表现为“启动成功但端口无监听”）。
 	// 这里用独立 ctx，停不停只由 Stop() 决定。
 	cctx, cancel := context.WithCancel(context.Background())
-	cmd := exec.CommandContext(cctx, m.PluginPath(),
+	// 隐藏控制台窗口：从 GUI 进程启动控制台程序时，Windows 会新建
+	// 一个黑框（cmd 里启动则继承父控制台，不会出现）。
+	cmd := proc.HideWindow(exec.CommandContext(cctx, m.PluginPath(),
 		"--listen", m.Addr(),
 		"--ip-list", m.IPListPath(),
 		"--domain-list", m.DomainListPath(),
 		"--policy", string(policy),
-	)
+	))
 	// 插件日志保留到管道，便于诊断（每 10 分钟一行重载信息）
 	pr, pw, err := os.Pipe()
 	if err != nil {

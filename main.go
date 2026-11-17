@@ -43,6 +43,7 @@ type app struct {
 	binSource string
 	binVer    string
 	binFound  bool
+	binErr    string // 查找/解压 gost 失败的原因
 	dlBusy    bool
 	dlDone    int64
 	dlTotal   int64
@@ -114,6 +115,9 @@ type app struct {
 	// splitSup 是分流插件的唯一管理者（启停只走它，UI 不碰）
 	splitSup *splitSupervisor
 
+	// logPath 是文件日志路径（设置页可打开，Windows 上排障主要靠它）
+	logPath string
+
 	// vm 是视图需要的派生状态，只由后台探测写（refreshViewModel），
 	// view 只读。渲染路径里不能有 exec/dial/读大文件，否则滚动会卡。
 	vm viewModel
@@ -151,6 +155,8 @@ func main() {
 	// 应用以中英两种语言书写：框架内建字符串（菜单角色名等）跟随系统语言
 	mygo.App.SetLanguages("en", "zh-Hans")
 	a := newApp()
+	// GUI 子系统下 stderr 无效，日志必须落文件，否则双击出问题时无从排查
+	a.logPath, _ = setupLogging(dataDir)
 	// 已经有一个实例在跑时（比如窗口被收起后再次启动图标），
 	// 把那个实例的窗口叫出来，而不是静默退出让人以为没反应。
 	mygo.App.OnSecondInstance(func([]string, string) { a.showMain() })

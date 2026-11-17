@@ -4,5 +4,5 @@ package splitbin
 
 import _ "embed"
 
-//go:embed splitd_windows_amd64.exe
+//go:embed splitd_windows_amd64.exe.gz
 var platformPlugin []byte

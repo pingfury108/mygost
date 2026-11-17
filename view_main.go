@@ -207,7 +207,12 @@ func (a *app) viewDashboard(c *ui.Context) {
 					ui.Row(c).Gap(sp3).AlignItems(ui.Center).Children(func() {
 						ui.Column(c).Grow(1).Gap(1).Children(func() {
 							ui.Text(c, "gost 未安装").FontSize(fsBody)
-							ui.Text(c, "下载后才能连接").FontSize(fsCaption).TextColor(t.TextMuted)
+							detail := "下载后才能连接"
+							if a.binErr != "" {
+								detail = a.binErr
+							}
+							ui.Text(c, detail).FontSize(fsCaption).
+								TextColor(t.TextMuted).SingleLine()
 						})
 						if a.dlBusy {
 							if a.dlTotal > 0 {
@@ -669,9 +674,17 @@ func (a *app) checkBinAsync() {
 			ver = gostbin.Version(path)
 		}
 		found := err == nil
+		// 把失败原因留住：Windows 上常见的是解压/杀软拦截，
+		// 只显示"未安装"会让用户完全无从下手
+		reason := ""
+		if err != nil {
+			reason = err.Error()
+			log.Printf("查找 gost 失败: %v", err)
+		}
 		a.win.Update(func() {
 			a.binFound = found
 			a.binPath, a.binSource, a.binVer = path, src, ver
+			a.binErr = reason
 		})
 	}()
 }

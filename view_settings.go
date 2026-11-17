@@ -156,6 +156,14 @@ func (a *app) viewSettings(c *ui.Context) {
 				ui.Column(c).FillWidth().Gap(sp2).Children(func() {
 					kvRow(c, tr("应用", "App"), "mygost "+appVersion+" · "+tr("gost 桌面客户端", "gost desktop client"))
 					kvRow(c, "数据目录", dataDir)
+					// 日志：Windows 上双击出问题只能靠它排查，做成可点击打开
+					settingRow(c, tr("运行日志", "Log file"), a.logPath, func() {
+						if a.logPath != "" {
+							ui.Button(c, tr("打开", "Open")).OnClick(func() {
+								mygo.Shell.OpenPath(filepath.Dir(a.logPath))
+							})
+						}
+					})
 					if a.stats != nil {
 						tod, tot := a.stats.Today(), a.stats.Total()
 						kvRow(c, "今日流量", metrics.FormatBytes(tod.Up)+" ↑ / "+metrics.FormatBytes(tod.Down)+" ↓")

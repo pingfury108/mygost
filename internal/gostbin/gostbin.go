@@ -21,6 +21,8 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"mygost/internal/proc"
 )
 
 // DefaultVersion 是下载使用的默认版本（不含 v 前缀）。
@@ -37,6 +39,9 @@ type Progress func(done, total int64)
 
 // Locator 管理二进制的查找与下载，dir 是下载存放目录。
 type Locator struct {
+	// lastErr 记录最近一次解压内置副本的失败原因（供界面显示）
+	lastErr error
+
 	Dir string
 }
 
@@ -68,6 +73,10 @@ func (l *Locator) Find(manualPath string) (path, source string, err error) {
 	}
 	if p, e := exec.LookPath("gost"); e == nil {
 		return p, "path", nil
+	}
+	// 带着内置副本的失败原因返回：Windows 上多半是安全软件拦截写盘
+	if le := l.LastErr(); le != nil {
+		return "", "", fmt.Errorf("%w（内置副本不可用：%v）", ErrNotFound, le)
 	}
 	return "", "", ErrNotFound
 }
@@ -151,7 +160,8 @@ func (l *Locator) Download(ctx context.Context, mirror string, onProgress Progre
 func Version(path string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, path, "-V").Output()
+	// 隐藏窗口：Windows 上每次版本检测都会闪一个黑框
+	out, err := proc.HideWindow(exec.CommandContext(ctx, path, "-V")).Output()
 	if err != nil {
 		return ""
 	}

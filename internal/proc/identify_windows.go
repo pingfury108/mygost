@@ -130,7 +130,8 @@ func PortOwner(port int) (pid int, name string) {
 	if port <= 0 {
 		return 0, ""
 	}
-	out, err := exec.Command("netstat", "-ano", "-p", "tcp").Output()
+	// 隐藏窗口：避免端口冲突诊断时闪一个黑框
+	out, err := HideWindow(exec.Command("netstat", "-ano", "-p", "tcp")).Output()
 	if err != nil {
 		return 0, ""
 	}

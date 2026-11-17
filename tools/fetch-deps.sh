@@ -32,11 +32,19 @@ fetch_gost darwin arm64 gost_darwin_arm64.tar.gz
 fetch_gost windows amd64 gost_windows_amd64.zip
 
 # ── splitd：本仓库源码交叉编译 ──
+# splitd 以 gzip 形式嵌入：裸二进制约 10MB，压缩后 3.7MB，
+# 安装时在内存里解压（离一次性成本）。gost 的压缩包同理。
 build_splitd() {
   local os=$1 arch=$2 out=$3
   echo "==> splitd ${os}/${arch}"
+  local tmp
+  tmp=$(mktemp -d)
   GOOS=$os GOARCH=$arch CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" \
-    -o "$SPLIT_DEST/$out" ./cmd/splitd
+    -o "$tmp/$out" ./cmd/splitd
+  gzip -9 -c "$tmp/$out" > "$SPLIT_DEST/$out.gz"
+  rm -rf "$tmp"
+  printf '    %-34s %6.1f MB\n' "$out.gz" \
+    "$(echo "scale=1; $(wc -c < "$SPLIT_DEST/$out.gz")/1048576" | bc)"
 }
 build_splitd darwin amd64 splitd_darwin_amd64
 build_splitd darwin arm64 splitd_darwin_arm64

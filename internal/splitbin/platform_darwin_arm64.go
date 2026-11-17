@@ -4,5 +4,5 @@ package splitbin
 
 import _ "embed"
 
-//go:embed splitd_darwin_arm64
+//go:embed splitd_darwin_arm64.gz
 var platformPlugin []byte
