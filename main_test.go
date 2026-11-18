@@ -585,3 +585,41 @@ func TestDataDirSeparatedFromProduction(t *testing.T) {
 		t.Error("开发版不能与正式版共用数据目录")
 	}
 }
+
+// 数据目录：默认跟随系统（Windows 上是 %APPDATA%），
+// 可用 MYGOST_DATA_DIR 覆盖（企业环境把 AppData 重定向到网络盘时的逃生口）。
+func TestResolveDataDir(t *testing.T) {
+	t.Setenv("MYGOST_DATA_DIR", "")
+	got, src := resolveDataDir()
+	if !strings.HasSuffix(got, dataDirName()) {
+		t.Errorf("默认路径应以 %s 结尾，got %q", dataDirName(), got)
+	}
+	if src == "" {
+		t.Error("应说明目录来源")
+	}
+
+	t.Setenv("MYGOST_DATA_DIR", "/tmp/mygost-custom")
+	got2, src2 := resolveDataDir()
+	if !strings.HasPrefix(got2, "/tmp/mygost-custom") {
+		t.Errorf("环境变量应生效，got %q", got2)
+	}
+	if !strings.Contains(src2, "MYGOST_DATA_DIR") {
+		t.Errorf("来源应标明环境变量，got %q", src2)
+	}
+}
+
+// UNC 路径识别（Windows 网络位置）。
+func TestIsNetworkPath(t *testing.T) {
+	cases := map[string]bool{
+		`\\server\share\mygost`: true,
+		`\\10.0.0.1\users`:      true,
+		`C:\Users\me\AppData`:   false,
+		`/Users/me/Library`:     false,
+		``:                      false,
+	}
+	for p, want := range cases {
+		if got := isNetworkPath(p); got != want {
+			t.Errorf("isNetworkPath(%q) = %v, want %v", p, got, want)
+		}
+	}
+}

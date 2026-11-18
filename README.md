@@ -61,7 +61,18 @@ go tool mygo build -platform "darwin/amd64,darwin/arm64,windows/amd64"
 | macOS | `~/Library/Application Support/mygost` |
 | Windows | `%APPDATA%\mygost` |
 
+系统把 AppData 改到其他盘时，`%APPDATA%` 已经指向新位置，会跟着走。也可以用环境变量指定：
+
+```bash
+MYGOST_DATA_DIR=D:\mygost-data      # Windows
+MYGOST_DATA_DIR=/Volumes/Data/mygost # macOS
+```
+
+> 企业环境若把 `%APPDATA%` 重定向到网络盘（`\\server\share`），从该路径直接执行
+> 解压出的 gost 可能被系统拦住；此时用 `MYGOST_DATA_DIR` 指到本地磁盘。
+
 开发版（`mygo dev`）自动用 `mygost-dev`，与正式版完全隔离（配置、进程、规则各管各的）。
+设置页「关于」显示实际路径与来源，可点击打开。
 
 ## 目录结构
 

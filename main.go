@@ -4,6 +4,8 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"time"
 
 	"github.com/egoist/mygo"
@@ -115,6 +117,9 @@ type app struct {
 	// splitSup 是分流插件的唯一管理者（启停只走它，UI 不碰）
 	splitSup *splitSupervisor
 
+	// dataDirSrc 说明数据目录来自哪里（%APPDATA% 或环境变量）
+	dataDirSrc string
+
 	// logPath 是文件日志路径（设置页可打开，Windows 上排障主要靠它）
 	logPath string
 
@@ -148,6 +153,35 @@ func dataDirName() string {
 	return "mygost"
 }
 
+// resolveDataDir 确定数据目录。
+//
+//  1. MYGOST_DATA_DIR 环境变量（绝对路径）——逃生口：当 %APPDATA%
+//     被企业策略重定向到网络位置时，gost.exe 从 UNC 路径启动会被系统
+//     拦住，用户需要把它指到本地盘
+//  2. os.UserConfigDir()：Windows 上就是 %APPDATA%，用户把 AppData
+//     改到 D: 盘或其他盘时，环境变量已经指向新位置，这里自动跟随
+func resolveDataDir() (string, string) {
+	if v := strings.TrimSpace(os.Getenv("MYGOST_DATA_DIR")); v != "" {
+		return filepath.Join(v, dataDirName()), "环境变量 MYGOST_DATA_DIR"
+	}
+	base, err := os.UserConfigDir()
+	if err != nil {
+		home, _ := os.UserHomeDir()
+		base = filepath.Join(home, ".config")
+	}
+	src := "系统配置目录"
+	if runtime.GOOS == "windows" {
+		src = "%APPDATA%"
+	}
+	return filepath.Join(base, dataDirName()), src
+}
+
+// isNetworkPath 报告路径是否位于网络位置（UNC）。
+// Windows 上从 UNC 路径直接执行 exe 常被安全策略拦住。
+func isNetworkPath(p string) bool {
+	return len(p) >= 2 && p[0] == '\\' && p[1] == '\\'
+}
+
 func main() {
 	if !mygo.App.RequestSingleInstanceLock() {
 		return
@@ -157,6 +191,12 @@ func main() {
 	a := newApp()
 	// GUI 子系统下 stderr 无效，日志必须落文件，否则双击出问题时无从排查
 	a.logPath, _ = setupLogging(dataDir)
+	// 网络位置（UNC）上直接执行解压出的 gost.exe 常被系统拦住，
+	// 提前说清楚比事后让用户猜要好
+	if isNetworkPath(dataDir) {
+		log.Printf("警告：数据目录位于网络位置（%s），gost 可能无法执行；"+
+			"可设置 MYGOST_DATA_DIR 指向本地磁盘", dataDir)
+	}
 	// 已经有一个实例在跑时（比如窗口被收起后再次启动图标），
 	// 把那个实例的窗口叫出来，而不是静默退出让人以为没反应。
 	mygo.App.OnSecondInstance(func([]string, string) { a.showMain() })
@@ -248,14 +288,9 @@ func main() {
 
 // newApp 初始化存储与进程管理器。
 func newApp() *app {
-	base, err := os.UserConfigDir()
-	if err != nil {
-		home, _ := os.UserHomeDir()
-		base = filepath.Join(home, ".config")
-	}
 	// 开发版与正式版用不同数据目录：两者各自的 gost/插件/配置互不干扰，
 	// 否则 dev 启动的实例会接管（或误杀）正式版在跑的进程。
-	dataDir = filepath.Join(base, dataDirName())
+	dataDir, dirSrc := resolveDataDir()
 
 	st, err := settings.Load(dataDir)
 	if err != nil {
@@ -266,14 +301,15 @@ func newApp() *app {
 		log.Printf("读取配置档失败: %v", err)
 	}
 	a := &app{
-		page:      "main",
-		logFollow: true,
-		st:        st,
-		ps:        ps,
-		loc:       &gostbin.Locator{Dir: filepath.Join(dataDir, "bin")},
-		geoM:      geo.NewManager(filepath.Join(dataDir, "geo"), geo.DefaultListenPort),
-		mc:        metrics.NewClient(""),
-		msp:       metrics.NewSpeed(5),
+		page:       "main",
+		dataDirSrc: dirSrc,
+		logFollow:  true,
+		st:         st,
+		ps:         ps,
+		loc:        &gostbin.Locator{Dir: filepath.Join(dataDir, "bin")},
+		geoM:       geo.NewManager(filepath.Join(dataDir, "geo"), geo.DefaultListenPort),
+		mc:         metrics.NewClient(""),
+		msp:        metrics.NewSpeed(5),
 	}
 	a.reqs = reqlog.New(500)
 	a.initRequestStore(filepath.Join(dataDir, "requests"))

@@ -155,7 +155,20 @@ func (a *app) viewSettings(c *ui.Context) {
 			card(c).Children(func() {
 				ui.Column(c).FillWidth().Gap(sp2).Children(func() {
 					kvRow(c, tr("应用", "App"), "mygost "+appVersion+" · "+tr("gost 桌面客户端", "gost desktop client"))
-					kvRow(c, "数据目录", dataDir)
+					// 数据目录：说明来源（%APPDATA% / 环境变量），可点击打开
+					settingRow(c, tr("数据目录", "Data directory"),
+						dataDir+"（"+a.dataDirSrc+"）", func() {
+							ui.Button(c, tr("打开", "Open")).OnClick(func() {
+								mygo.Shell.OpenPath(dataDir)
+							})
+						})
+					if isNetworkPath(dataDir) {
+						ui.Text(c, tr("该目录位于网络位置，可能无法启动内置 gost；"+
+							"可用环境变量 MYGOST_DATA_DIR 指向本地磁盘",
+							"Network location: the bundled gost may not run; "+
+								"set MYGOST_DATA_DIR to a local disk")).
+							FontSize(fsCaption).TextColor(t.Warning)
+					}
 					// 日志：Windows 上双击出问题只能靠它排查，做成可点击打开
 					settingRow(c, tr("运行日志", "Log file"), a.logPath, func() {
 						if a.logPath != "" {
