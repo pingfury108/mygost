@@ -1,0 +1,27 @@
+{
+  "type": "design",
+  "designSystems": [],
+  "primaryDesignSystem": null,
+  "assets": {
+    "UI 重设计 · 交互画布": {
+      "versions": [
+        {
+          "path": "index.html",
+          "createdAt": "2026-11-03T14:07:29.715Z",
+          "status": "needs-review"
+        }
+      ]
+    },
+    "UI 重设计 · 总览": {
+      "versions": [
+        {
+          "path": "sheets.html",
+          "createdAt": "2026-11-03T14:07:29.815Z",
+          "status": "needs-review"
+        }
+      ]
+    }
+  },
+  "createdAt": "2026-11-03T14:07:29.727Z",
+  "updatedAt": "2026-11-03T14:07:29.816Z"
+}
