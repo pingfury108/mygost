@@ -61,7 +61,13 @@ go tool mygo build -platform "darwin/amd64,darwin/arm64,windows/amd64"
 | macOS | `~/Library/Application Support/mygost` |
 | Windows | `%APPDATA%\mygost` |
 
-系统把 AppData 改到其他盘时，`%APPDATA%` 已经指向新位置，会跟着走。也可以用环境变量指定：
+**可以在设置里更改**：设置 → 关于 → 数据目录 →「更改…」，选目录后可选是否迁移现有数据，
+重启生效。默认位置跟随系统（Windows 的 `%APPDATA%`、macOS 的 `~/Library/Application Support`）。
+
+> 注意：Windows 设置里的「更改新内容的保存位置」只影响文档/图片等已知文件夹和商店应用，
+> **不会**改变 `%APPDATA%`——所以默认仍写 C 盘。要换盘请用上面的应用内设置。
+
+也可以用环境变量指定（优先于应用内设置）：
 
 ```bash
 MYGOST_DATA_DIR=D:\mygost-data      # Windows

@@ -1,10 +1,10 @@
 package main
 
 import (
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"time"
 
@@ -117,8 +117,14 @@ type app struct {
 	// splitSup 是分流插件的唯一管理者（启停只走它，UI 不碰）
 	splitSup *splitSupervisor
 
-	// dataDirSrc 说明数据目录来自哪里（%APPDATA% 或环境变量）
+	// dataDirSrc 说明数据目录来自哪里（系统默认 / 自定义 / 环境变量）
 	dataDirSrc string
+	// dataDirWarn 是回退到默认目录的原因（自定义目录不可用时非空）
+	dataDirWarn string
+	// pendingDataDir 是待确认的新目录（用户刚选完，还没落盘）
+	pendingDataDir string
+	// dataDirRestart 表示目录已改，等待重启生效
+	dataDirRestart bool
 
 	// logPath 是文件日志路径（设置页可打开，Windows 上排障主要靠它）
 	logPath string
@@ -153,27 +159,43 @@ func dataDirName() string {
 	return "mygost"
 }
 
-// resolveDataDir 确定数据目录。
+// resolveDataDir 确定数据目录，返回 (目录, 来源说明, 回退原因)。
 //
-//  1. MYGOST_DATA_DIR 环境变量（绝对路径）——逃生口：当 %APPDATA%
-//     被企业策略重定向到网络位置时，gost.exe 从 UNC 路径启动会被系统
-//     拦住，用户需要把它指到本地盘
-//  2. os.UserConfigDir()：Windows 上就是 %APPDATA%，用户把 AppData
-//     改到 D: 盘或其他盘时，环境变量已经指向新位置，这里自动跟随
-func resolveDataDir() (string, string) {
-	if v := strings.TrimSpace(os.Getenv("MYGOST_DATA_DIR")); v != "" {
-		return filepath.Join(v, dataDirName()), "环境变量 MYGOST_DATA_DIR"
+// 优先级：
+//
+//  1. MYGOST_DATA_DIR 环境变量（脚本/运维用）
+//  2. 默认目录下的指针文件（用户在设置里改过目录）
+//  3. 默认目录：Windows %APPDATA%\mygost，macOS ~/Library/Application Support/mygost
+//
+// 指针指向的目录不可用时回退默认目录，并把原因带回界面——不阻塞启动。
+func resolveDataDir() (dir, src, warn string) {
+	if v := cleanDirEnv(os.Getenv("MYGOST_DATA_DIR")); v != "" {
+		return v, "环境变量 MYGOST_DATA_DIR", ""
 	}
-	base, err := os.UserConfigDir()
-	if err != nil {
-		home, _ := os.UserHomeDir()
-		base = filepath.Join(home, ".config")
+	def := defaultDataDir()
+	if p := readPointer(); p != "" {
+		if err := ensureWritableDir(p); err == nil {
+			return p, "自定义目录", ""
+		} else {
+			return def, "系统默认目录",
+				fmt.Sprintf("自定义数据目录不可用，已回退默认位置：%v", err)
+		}
 	}
-	src := "系统配置目录"
-	if runtime.GOOS == "windows" {
-		src = "%APPDATA%"
+	return def, "系统默认目录", ""
+}
+
+// cleanDirEnv 清理目录类环境变量：去空白、去包裹引号、去末尾分隔符。
+//
+// Windows 用户在系统属性里填值时经常连引号一起粘进来，
+// 或者写成 D:\dir\ —— 直接拿去 Join 会得到奇怪的路径。
+func cleanDirEnv(v string) string {
+	v = strings.TrimSpace(v)
+	if len(v) >= 2 {
+		if (v[0] == '"' && v[len(v)-1] == '"') || (v[0] == '\'' && v[len(v)-1] == '\'') {
+			v = strings.TrimSpace(v[1 : len(v)-1])
+		}
 	}
-	return filepath.Join(base, dataDirName()), src
+	return v
 }
 
 // isNetworkPath 报告路径是否位于网络位置（UNC）。
@@ -190,6 +212,9 @@ func main() {
 	mygo.App.SetLanguages("en", "zh-Hans")
 	a := newApp()
 	// GUI 子系统下 stderr 无效，日志必须落文件，否则双击出问题时无从排查
+	// 让 mygo 自己的用户数据（window-state.json 等）也落在我们选的目录，
+	// 否则自定义数据目录后它仍会写到系统默认位置
+	mygo.App.SetPath(mygo.PathUserData, dataDir)
 	a.logPath, _ = setupLogging(dataDir)
 	// 网络位置（UNC）上直接执行解压出的 gost.exe 常被系统拦住，
 	// 提前说清楚比事后让用户猜要好
@@ -290,7 +315,10 @@ func main() {
 func newApp() *app {
 	// 开发版与正式版用不同数据目录：两者各自的 gost/插件/配置互不干扰，
 	// 否则 dev 启动的实例会接管（或误杀）正式版在跑的进程。
-	dataDir, dirSrc := resolveDataDir()
+	dataDir, dirSrc, dirWarn := resolveDataDir()
+	if dirWarn != "" {
+		log.Printf("%s", dirWarn)
+	}
 
 	st, err := settings.Load(dataDir)
 	if err != nil {
@@ -301,15 +329,16 @@ func newApp() *app {
 		log.Printf("读取配置档失败: %v", err)
 	}
 	a := &app{
-		page:       "main",
-		dataDirSrc: dirSrc,
-		logFollow:  true,
-		st:         st,
-		ps:         ps,
-		loc:        &gostbin.Locator{Dir: filepath.Join(dataDir, "bin")},
-		geoM:       geo.NewManager(filepath.Join(dataDir, "geo"), geo.DefaultListenPort),
-		mc:         metrics.NewClient(""),
-		msp:        metrics.NewSpeed(5),
+		page:        "main",
+		dataDirSrc:  dirSrc,
+		dataDirWarn: dirWarn,
+		logFollow:   true,
+		st:          st,
+		ps:          ps,
+		loc:         &gostbin.Locator{Dir: filepath.Join(dataDir, "bin")},
+		geoM:        geo.NewManager(filepath.Join(dataDir, "geo"), geo.DefaultListenPort),
+		mc:          metrics.NewClient(""),
+		msp:         metrics.NewSpeed(5),
 	}
 	a.reqs = reqlog.New(500)
 	a.initRequestStore(filepath.Join(dataDir, "requests"))

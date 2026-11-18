@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log"
 	"path/filepath"
 	"time"
 
@@ -155,20 +156,8 @@ func (a *app) viewSettings(c *ui.Context) {
 			card(c).Children(func() {
 				ui.Column(c).FillWidth().Gap(sp2).Children(func() {
 					kvRow(c, tr("应用", "App"), "mygost "+appVersion+" · "+tr("gost 桌面客户端", "gost desktop client"))
-					// 数据目录：说明来源（%APPDATA% / 环境变量），可点击打开
-					settingRow(c, tr("数据目录", "Data directory"),
-						dataDir+"（"+a.dataDirSrc+"）", func() {
-							ui.Button(c, tr("打开", "Open")).OnClick(func() {
-								mygo.Shell.OpenPath(dataDir)
-							})
-						})
-					if isNetworkPath(dataDir) {
-						ui.Text(c, tr("该目录位于网络位置，可能无法启动内置 gost；"+
-							"可用环境变量 MYGOST_DATA_DIR 指向本地磁盘",
-							"Network location: the bundled gost may not run; "+
-								"set MYGOST_DATA_DIR to a local disk")).
-							FontSize(fsCaption).TextColor(t.Warning)
-					}
+					// 数据目录：显示实际路径与来源，可打开/更改/恢复默认
+					a.dataDirRow(c)
 					// 日志：Windows 上双击出问题只能靠它排查，做成可点击打开
 					settingRow(c, tr("运行日志", "Log file"), a.logPath, func() {
 						if a.logPath != "" {
@@ -182,6 +171,7 @@ func (a *app) viewSettings(c *ui.Context) {
 						kvRow(c, "今日流量", metrics.FormatBytes(tod.Up)+" ↑ / "+metrics.FormatBytes(tod.Down)+" ↓")
 						kvRow(c, "近 31 天", metrics.FormatBytes(tot.Up)+" ↑ / "+metrics.FormatBytes(tot.Down)+" ↓")
 					}
+					a.dataDirPendingBlock(c)
 				})
 			})
 
@@ -439,5 +429,139 @@ func (a *app) splitCountsDesc() string {
 		return tr("规则不完整", "Incomplete rules")
 	default:
 		return tr("未下载", "Not downloaded")
+	}
+}
+
+// dataDirRow 是「数据目录」设置行：路径、打开、更改、恢复默认。
+//
+// 目录变更必须重启才生效（各组件在启动时持有路径），
+// 所以改完后只提示，并提供「立即重启」。
+func (a *app) dataDirRow(c *ui.Context) {
+	t := c.Theme()
+
+	settingRow(c, tr("数据目录", "Data directory"),
+		dataDir+"  ·  "+a.dataDirSrc, func() {
+			ui.Row(c).Gap(sp2).Children(func() {
+				ui.Button(c, tr("打开", "Open")).OnClick(func() {
+					mygo.Shell.OpenPath(dataDir)
+				})
+				ui.Button(c, tr("更改…", "Change…")).OnClick(a.pickDataDir)
+				if a.dataDirSrc == "自定义目录" {
+					ui.Button(c, tr("默认", "Default")).OnClick(a.resetDataDir)
+				}
+			})
+		})
+
+	// 回退原因（自定义目录不可用）或网络位置提醒
+	if a.dataDirWarn != "" {
+		ui.Text(c, a.dataDirWarn).FontSize(fsCaption).TextColor(t.Warning)
+	}
+	if isNetworkPath(dataDir) {
+		ui.Text(c, tr("该目录位于网络位置，可能无法启动内置 gost；"+
+			"请改用本地磁盘",
+			"Network location: the bundled gost may not run; use a local disk")).
+			FontSize(fsCaption).TextColor(t.Warning)
+	}
+
+}
+
+// pickDataDir 让用户选一个新目录，进入待确认状态。
+func (a *app) pickDataDir() {
+	dirs, err := mygo.Dialog.Open(mygo.OpenDialogOptions{
+		Title:             tr("选择数据目录", "Choose data directory"),
+		Directory:         true,
+		CreateDirectories: true,
+		DefaultPath:       filepath.Dir(dataDir),
+	})
+	if err != nil || len(dirs) == 0 {
+		return
+	}
+	next := dirs[0]
+	if err := validateDataDirTarget(dataDir, next); err != nil {
+		a.toast(err.Error(), "error")
+		return
+	}
+	a.win.Update(func() { a.pendingDataDir = cleanDirEnv(next) })
+}
+
+// applyDataDir 落实目录变更：可选迁移，然后写指针。
+func (a *app) applyDataDir(migrate bool) {
+	next := a.pendingDataDir
+	if next == "" {
+		return
+	}
+	a.win.Update(func() { a.pendingDataDir = "" })
+
+	// gost 正在跑时先停：迁移会复制 gost 可执行文件，
+	// 运行中的进程会锁住文件（Windows 上尤其如此）
+	if st, _, _ := a.pm.State(); st == proc.Running {
+		a.stopGost()
+	}
+
+	if migrate {
+		n, err := migrateDataDir(dataDir, next)
+		if err != nil {
+			a.toast(tr("迁移失败: ", "Migration failed: ")+err.Error(), "error")
+			return
+		}
+		log.Printf("数据目录迁移：%d 个文件 → %s", n, next)
+	}
+	if err := writePointer(next); err != nil {
+		a.toast(tr("保存失败: ", "Save failed: ")+err.Error(), "error")
+		return
+	}
+	a.win.Update(func() { a.dataDirRestart = true })
+	a.toast(tr("重启后生效", "Takes effect after restart"), "success")
+}
+
+// resetDataDir 删除指针，回到系统默认目录。
+func (a *app) resetDataDir() {
+	if err := clearPointer(); err != nil {
+		a.toast(tr("恢复失败: ", "Reset failed: ")+err.Error(), "error")
+		return
+	}
+	a.win.Update(func() { a.dataDirRestart = true })
+	a.toast(tr("已恢复默认目录，重启后生效", "Default restored. Restart to apply"), "success")
+}
+
+// dataDirPendingBlock 渲染目录变更的确认区与重启提示。
+// 放在「关于」卡片末尾，不打断上面的信息行。
+func (a *app) dataDirPendingBlock(c *ui.Context) {
+	t := c.Theme()
+
+	if a.pendingDataDir != "" {
+		ui.Divider(c)
+		ui.Column(c).FillWidth().Gap(sp2).Children(func() {
+			ui.Text(c, tr("更改数据目录", "Change data directory")).FontSize(fsBody).Bold()
+			ui.Text(c, a.pendingDataDir).FontSize(fsCaption).
+				Font("monospace").TextColor(t.TextMuted).SingleLine()
+			ui.Text(c, tr("迁移会把现有配置档、分流规则、gost 与日志复制过去（不删除原目录）；"+
+				"不迁移则新目录从空白开始。",
+				"Migrate copies profiles, rules, gost and logs (originals kept). "+
+					"Without migrating the new directory starts empty.")).
+				FontSize(fsCaption).TextColor(t.TextMuted)
+			ui.Row(c).FillWidth().Gap(sp2).Children(func() {
+				ui.Button(c, tr("取消", "Cancel")).Grow(1).OnClick(func() {
+					a.pendingDataDir = ""
+				})
+				ui.Button(c, tr("仅更改", "Change only")).Grow(1).OnClick(func() {
+					a.applyDataDir(false)
+				})
+				ui.PrimaryButton(c, tr("迁移并更改", "Migrate")).Grow(2).OnClick(func() {
+					a.applyDataDir(true)
+				})
+			})
+		})
+	}
+
+	if a.dataDirRestart {
+		ui.Divider(c)
+		ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(sp2).Children(func() {
+			ui.Text(c, tr("数据目录已保存，重启后生效", "Saved. Restart to apply")).
+				FontSize(fsCaption).TextColor(t.TextMuted).Grow(1)
+			ui.PrimaryButton(c, tr("立即重启", "Restart now")).OnClick(func() {
+				mygo.App.Relaunch()
+			})
+		})
 	}
 }

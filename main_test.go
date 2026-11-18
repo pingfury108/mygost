@@ -590,7 +590,10 @@ func TestDataDirSeparatedFromProduction(t *testing.T) {
 // 可用 MYGOST_DATA_DIR 覆盖（企业环境把 AppData 重定向到网络盘时的逃生口）。
 func TestResolveDataDir(t *testing.T) {
 	t.Setenv("MYGOST_DATA_DIR", "")
-	got, src := resolveDataDir()
+	got, src, warn := resolveDataDir()
+	if warn != "" {
+		t.Logf("回退提示: %s", warn)
+	}
 	if !strings.HasSuffix(got, dataDirName()) {
 		t.Errorf("默认路径应以 %s 结尾，got %q", dataDirName(), got)
 	}
@@ -599,7 +602,7 @@ func TestResolveDataDir(t *testing.T) {
 	}
 
 	t.Setenv("MYGOST_DATA_DIR", "/tmp/mygost-custom")
-	got2, src2 := resolveDataDir()
+	got2, src2, _ := resolveDataDir()
 	if !strings.HasPrefix(got2, "/tmp/mygost-custom") {
 		t.Errorf("环境变量应生效，got %q", got2)
 	}
