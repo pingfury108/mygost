@@ -246,6 +246,9 @@ func main() {
 		log.Printf("警告：数据目录位于网络位置（%s），gost 可能无法执行；"+
 			"可设置 MYGOST_DATA_DIR 指向本地磁盘", dataDir)
 	}
+	if len(dataDir) > 180 {
+		log.Printf("警告：数据目录路径过长（%d 字符），Windows 下可能触发 260 字符上限", len(dataDir))
+	}
 	// 已经有一个实例在跑时（比如窗口被收起后再次启动图标），
 	// 把那个实例的窗口叫出来，而不是静默退出让人以为没反应。
 	mygo.App.OnSecondInstance(func([]string, string) { a.showMain() })
@@ -266,6 +269,13 @@ func main() {
 		a.sKeep = s.KeepOnExit
 		a.sAuto = s.AutoStart
 		a.sLogin = mygo.App.OpenAtLogin()
+		// 自启动自愈：应用被移动到新路径后，注册表/LaunchAgents 里仍是旧路径，
+		// 开机自启会静默失效。开着就按当前 exe 路径重写一次。
+		if a.sLogin {
+			if err := mygo.App.SetOpenAtLogin(true); err != nil {
+				log.Printf("修正自启动项失败: %v", err)
+			}
+		}
 		a.sSplit = s.Split
 		a.sSplitURL = s.SplitIPListURL
 		if s.SplitPolicy == "resolve" {

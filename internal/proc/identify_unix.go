@@ -5,13 +5,14 @@ package proc
 import (
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 )
 
 // FindByConfig 扫描命令行包含 configPath 的 gost 进程。
 // 用于识别没有 PID 文件的遗留进程（例如旧版本启动的）。
-func FindByConfig(configPath string) []int {
+func FindByConfig(configPath string, _ ...string) []int {
 	if strings.TrimSpace(configPath) == "" {
 		return nil
 	}
@@ -70,4 +71,39 @@ func Terminate(pid int) error {
 		return exec.Command("kill", "-9", strconv.Itoa(pid)).Run()
 	}
 	return nil
+}
+
+// processImagePath 返回进程可执行文件路径。
+func processImagePath(pid int) string {
+	out, err := exec.Command("ps", "-o", "comm=", "-p", strconv.Itoa(pid)).Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// underAnyDir 报告路径是否位于任一目录下。
+func underAnyDir(p string, dirs []string) bool {
+	if p == "" {
+		return false
+	}
+	cp := filepath.Clean(p)
+	for _, d := range dirs {
+		if d == "" {
+			continue
+		}
+		cd := filepath.Clean(d)
+		if cp == cd || strings.HasPrefix(cp, cd+string(filepath.Separator)) {
+			return true
+		}
+	}
+	return false
+}
+
+// matchesRecord 校验 pid 是否仍是记录里的那个进程（unix：命令行含配置路径）。
+func matchesRecord(rec Record) bool {
+	if rec.Config == "" {
+		return true
+	}
+	return cmdlineContains(rec.PID, rec.Config)
 }

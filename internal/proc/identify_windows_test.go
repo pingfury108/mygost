@@ -71,3 +71,47 @@ func TestFindByConfigFast(t *testing.T) {
 		t.Errorf("FindByConfig 耗时 %v，应 < 500ms", elapsed)
 	}
 }
+
+// 只在指定目录下的 gost.exe 才算我们的进程：避免误杀用户自己的 gost。
+func TestFindByConfigScopedByDir(t *testing.T) {
+	// 当前系统上不一定有 gost 进程，这里只验证"不同目录不匹配"的语义
+	dirs := []string{`C:\definitely\not\matching`}
+	got := FindByConfig(`C:\profiles`, dirs...)
+	for _, pid := range got {
+		exe := processImagePath(pid)
+		if exe == "" {
+			continue
+		}
+		if underAnyDir(exe, dirs) {
+			t.Errorf("pid %d (%s) 不应匹配 %v", pid, exe, dirs)
+		}
+	}
+}
+
+// 路径归属判断：不区分大小写，且要求是目录前缀而非字符串前缀。
+func TestUnderAnyDir(t *testing.T) {
+	dirs := []string{`C:\Users\me\AppData\Roaming\mygost\bin`}
+	cases := map[string]bool{
+		`C:\Users\me\AppData\Roaming\mygost\bin\gost.exe`:          true,
+		`c:\users\me\appdata\roaming\mygost\BIN\gost.exe`:          true,
+		`C:\Users\me\AppData\Roaming\mygost\bin\embedded\gost.exe`: true,
+		`C:\Users\me\AppData\Roaming\mygost\binary\gost.exe`:       false,
+		`D:\下载\gost.exe`: false,
+	}
+	for p, want := range cases {
+		if got := underAnyDir(p, dirs); got != want {
+			t.Errorf("underAnyDir(%q) = %v, want %v", p, got, want)
+		}
+	}
+}
+
+// 拒绝结束非 gost 进程（PID 复用保护）。
+func TestTerminateRejectsNonGost(t *testing.T) {
+	// 用当前测试进程冒充：它的 exe 不是 gost.exe
+	if err := Terminate(os.Getpid()); err == nil {
+		t.Fatal("不应允许结束非 gost 进程")
+	}
+	if !ProcessAlive(os.Getpid()) {
+		t.Fatal("测试进程被误杀")
+	}
+}

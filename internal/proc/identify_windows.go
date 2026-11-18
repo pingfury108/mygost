@@ -5,6 +5,7 @@ package proc
 import (
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -37,11 +38,10 @@ const (
 
 // procEntry 是快照里的一条进程记录。
 type procEntry struct {
-	pid       int
-	ppid      int
-	exe       string
-	cmdline   string
-	inherited bool // 从父进程的命令行继承（见 snapshot 注释）
+	pid   int
+	ppid  int
+	exe   string
+	image string // 可执行文件完整路径（懒加载，见 path()）
 }
 
 // snapshot 缓存一次枚举的结果，有效期 snapshotTTL。
@@ -99,7 +99,12 @@ func listProcesses() (map[int]procEntry, error) {
 // Windows 拿不到可靠的其他进程命令行（需要读 PEB），所以这里以
 // exe 名过滤；PID 文件（含精确 config）仍然是最权威的匹配方式，
 // 这个枚举只作补充（接管残留/统计孤儿）。
-func FindByConfig(configPath string) []int {
+// FindByConfig 返回 exe 名为 gost 的进程。
+//
+// exeDirs 非空时进一步限定"可执行文件位于这些目录下"——Windows 拿不到
+// 其他进程的完整命令行，若只按 exe 名匹配，会把用户自己启动的 gost
+// （甚至别的软件的 gost）也当成我们的残留进程，进而误杀。
+func FindByConfig(configPath string, exeDirs ...string) []int {
 	if strings.TrimSpace(configPath) == "" {
 		return nil
 	}
@@ -109,11 +114,63 @@ func FindByConfig(configPath string) []int {
 	}
 	var out []int
 	for pid, e := range procs {
-		if isGostExe(e.exe) {
+		if !isGostExe(e.exe) {
+			continue
+		}
+		if len(exeDirs) == 0 {
+			out = append(out, pid)
+			continue
+		}
+		if underAnyDir(e.path(pid), exeDirs) {
 			out = append(out, pid)
 		}
 	}
 	return out
+}
+
+// path 返回进程可执行文件路径（按需查询并缓存）。
+func (e *procEntry) path(pid int) string {
+	if e.image != "" {
+		return e.image
+	}
+	e.image = processImagePath(pid)
+	return e.image
+}
+
+// underAnyDir 报告路径是否位于任一目录下（不区分大小写）。
+func underAnyDir(p string, dirs []string) bool {
+	if p == "" {
+		return false
+	}
+	lp := strings.ToLower(filepath.Clean(p))
+	for _, d := range dirs {
+		if d == "" {
+			continue
+		}
+		ld := strings.ToLower(filepath.Clean(d))
+		if lp == ld || strings.HasPrefix(lp, ld+string(filepath.Separator)) {
+			return true
+		}
+	}
+	return false
+}
+
+// processImagePath 取进程可执行文件的完整路径。
+//
+// 与命令行不同，路径可以直接通过 OpenProcess +
+// QueryFullProcessImageName 拿到，无需读 PEB。
+func processImagePath(pid int) string {
+	h, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
+	if err != nil {
+		return ""
+	}
+	defer windows.CloseHandle(h)
+	buf := make([]uint16, 1024)
+	size := uint32(len(buf))
+	if err := windows.QueryFullProcessImageName(h, 0, &buf[0], &size); err != nil {
+		return ""
+	}
+	return windows.UTF16ToString(buf[:size])
 }
 
 // isGostExe 报告 exe 名是否是我们关心的 gost（不区分大小写）。
@@ -179,6 +236,11 @@ func ProcessAlive(pid int) bool {
 func Terminate(pid int) error {
 	if pid <= 0 {
 		return fmt.Errorf("无效 pid")
+	}
+	// PID 可能被系统复用：确认目标确实是 gost 再动手
+	if exe := strings.ToLower(filepath.Base(processImagePath(pid))); exe != "" &&
+		exe != "gost.exe" {
+		return fmt.Errorf("pid %d 不是 gost（%s），已跳过", pid, exe)
 	}
 	h, err := windows.OpenProcess(processTerminate|processQueryLimitedInformation, false, uint32(pid))
 	if err != nil {
@@ -308,4 +370,20 @@ func stopGostGraceful(pid int, wait time.Duration) bool {
 		time.Sleep(30 * time.Millisecond)
 	}
 	return !ProcessAlive(pid)
+}
+
+// matchesRecord 校验 pid 是否仍是记录里的那个进程。
+//
+// Windows 读不到其他进程的命令行，用可执行文件完整路径比对：
+// 路径一致才可能是同一个进程（PID 复用时路径几乎必然不同）。
+// 路径取不到时退回 exe 名判断，至少排除"被别的程序复用"。
+func matchesRecord(rec Record) bool {
+	exe := processImagePath(rec.PID)
+	if exe == "" {
+		return true // 拿不到信息时不否决，交给存活判断
+	}
+	if rec.Binary != "" {
+		return strings.EqualFold(filepath.Clean(exe), filepath.Clean(rec.Binary))
+	}
+	return isGostExe(filepath.Base(exe))
 }

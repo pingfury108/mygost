@@ -329,7 +329,7 @@ func (a *app) updateSplitLists() {
 
 // leftovers 返回不属于当前会话、但由本应用启动的 gost 进程。
 func (a *app) leftovers() []int {
-	all := proc.FindByConfig(filepath.Join(dataDir, "profiles"))
+	all := proc.FindByConfig(filepath.Join(dataDir, "profiles"), a.gostExeDirs()...)
 	cur := a.pm.Pid()
 	out := make([]int, 0, len(all))
 	for _, p := range all {
@@ -460,6 +460,11 @@ func (a *app) dataDirRow(c *ui.Context) {
 		ui.Text(c, tr("该目录位于网络位置，可能无法启动内置 gost；"+
 			"请改用本地磁盘",
 			"Network location: the bundled gost may not run; use a local disk")).
+			FontSize(fsCaption).TextColor(t.Warning)
+	}
+	if len(dataDir) > 180 {
+		ui.Text(c, tr("路径过长，Windows 下可能触发 260 字符上限，建议换一个更短的目录",
+			"Path is long; Windows may hit the 260-character limit")).
 			FontSize(fsCaption).TextColor(t.Warning)
 	}
 

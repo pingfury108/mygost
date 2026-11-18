@@ -40,7 +40,7 @@ func (a *app) probeViewModel() viewModel {
 	vm.splitAlive = a.geoM.Alive()
 
 	// 残留进程：pgrep 会 fork 一个进程，是这几项里最贵的
-	if all := proc.FindByConfig(filepath.Join(dataDir, "profiles")); len(all) > 0 {
+	if all := proc.FindByConfig(filepath.Join(dataDir, "profiles"), a.gostExeDirs()...); len(all) > 0 {
 		cur := a.pm.Pid()
 		for _, p := range all {
 			if p != cur {

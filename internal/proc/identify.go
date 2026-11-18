@@ -54,8 +54,10 @@ func ReadPIDFile(dir string) (Record, bool) {
 	if rec.PID <= 0 || !ProcessAlive(rec.PID) {
 		return rec, false
 	}
-	// PID 可能被系统复用：用命令行再确认一次是同一个配置
-	if rec.Config != "" && !cmdlineContains(rec.PID, rec.Config) {
+	// PID 可能被系统复用：再确认一次它确实是同一个进程。
+	// 判定方式按平台不同——Windows 拿不到别人的命令行，用可执行文件路径；
+	// unix 用命令行是否包含配置路径。
+	if !matchesRecord(rec) {
 		return rec, false
 	}
 	return rec, true
@@ -104,3 +106,18 @@ func parsePids(s string, _ int) []int {
 
 // ErrNoProcess 表示没有可接管的进程。
 var ErrNoProcess = fmt.Errorf("没有可接管的 gost 进程")
+
+// ProcessImagePath 返回进程可执行文件的完整路径（取不到时为空）。
+//
+// Windows 通过 QueryFullProcessImageName 取得；unix 走 /proc 或 ps。
+func ProcessImagePath(pid int) string {
+	if pid <= 0 {
+		return ""
+	}
+	return processImagePath(pid)
+}
+
+// UnderAnyDir 报告路径是否位于任一目录下（不区分大小写）。
+func UnderAnyDir(p string, dirs []string) bool {
+	return underAnyDir(p, dirs)
+}

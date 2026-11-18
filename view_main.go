@@ -483,7 +483,7 @@ func (a *app) doStart() {
 				return
 			}
 			// 占用者是我们启动的 gost（命令行含配置目录）
-			if isOurGost(ownerPid) {
+			if a.isOurGost(ownerPid) {
 				a.toast(tr("端口 ", "Port ")+p.Listen+
 					tr(" 被本应用启动的另一个 gost 占用，请先断开它",
 						" is held by another gost started by mygost; disconnect it first"), "error")
@@ -569,20 +569,13 @@ func (a *app) findOwn(profileID string) (pid int, started time.Time, ok bool) {
 		return rec.PID, rec.Started, true
 	}
 	// 兜底：命令行里带这个配置文件的进程
-	for _, p := range proc.FindByConfig(yml) {
+	for _, p := range proc.FindByConfig(yml, a.gostExeDirs()...) {
 		return p, time.Time{}, true
 	}
 	return 0, time.Time{}, false
 }
 
 // isOurGost 判断 pid 是否为 mygost 启动的 gost（命令行含 profiles 目录）。
-func isOurGost(pid int) bool {
-	if pid <= 0 {
-		return false
-	}
-	return proc.CommandlineContains(pid, filepath.Join(dataDir, "profiles"))
-}
-
 // startedAt 返回进程启动时间（接管场景下可能为零值）。
 func startedAt(pm *proc.Manager) (time.Time, bool, bool) {
 	st, started, reason := pm.State()
@@ -736,4 +729,48 @@ func metricsPortFromYaml(path string) (int, bool) {
 		return 0, false
 	}
 	return n, true
+}
+
+// gostExeDirs 返回本应用可能使用的 gost 可执行文件所在目录。
+//
+// Windows 上用它把「我们的 gost」和其他 gost 区分开：只按 exe 名匹配
+// 会把用户自己启动的 gost 也当成残留进程（进而误杀）。
+func (a *app) gostExeDirs() []string {
+	dirs := []string{
+		filepath.Join(dataDir, "bin"),
+		filepath.Join(dataDir, "bin", "embedded"),
+	}
+	if a.binPath != "" {
+		dirs = append(dirs, filepath.Dir(a.binPath))
+	}
+	s := a.st.Get()
+	if strings.TrimSpace(s.GostPath) != "" {
+		dirs = append(dirs, filepath.Dir(s.GostPath))
+	}
+	// 去重（大小写/分隔符差异交给 underAnyDir 处理）
+	seen := map[string]bool{}
+	out := make([]string, 0, len(dirs))
+	for _, d := range dirs {
+		d = filepath.Clean(d)
+		if d == "" || d == "." || seen[d] {
+			continue
+		}
+		seen[d] = true
+		out = append(out, d)
+	}
+	return out
+}
+
+// isOurGost 报告进程是否由本应用启动（按可执行文件路径判断）。
+//
+// Windows 拿不到别人的命令行，只能按路径区分；unix 有命令行，
+// 路径取不到时退回原来的判断。
+func (a *app) isOurGost(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	if exe := proc.ProcessImagePath(pid); exe != "" {
+		return proc.UnderAnyDir(exe, a.gostExeDirs())
+	}
+	return proc.CommandlineContains(pid, filepath.Join(dataDir, "profiles"))
 }
