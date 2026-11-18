@@ -237,10 +237,11 @@ func Terminate(pid int) error {
 	if pid <= 0 {
 		return fmt.Errorf("无效 pid")
 	}
-	// PID 可能被系统复用：确认目标确实是 gost 再动手
-	if exe := strings.ToLower(filepath.Base(processImagePath(pid))); exe != "" &&
-		exe != "gost.exe" {
-		return fmt.Errorf("pid %d 不是 gost（%s），已跳过", pid, exe)
+	// PID 可能被系统复用：确认目标确实是 gost 再动手。
+	// 允许 gost.exe / gost-v3.3.1.exe 这类同前缀命名（用户可能改过文件名）。
+	if base := strings.ToLower(strings.TrimSuffix(filepath.Base(processImagePath(pid)), ".exe")); base != "" &&
+		!strings.HasPrefix(base, "gost") {
+		return fmt.Errorf("pid %d 不是 gost（%s），已跳过", pid, base)
 	}
 	h, err := windows.OpenProcess(processTerminate|processQueryLimitedInformation, false, uint32(pid))
 	if err != nil {
