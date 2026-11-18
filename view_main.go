@@ -427,6 +427,13 @@ func (a *app) currentProfile() *profiles.Profile {
 
 // doStart 找二进制并启动当前档（后台 goroutine 执行）。
 func (a *app) doStart() {
+	// 串行化启停：自动启动与用户点击可能并发进来，
+	// 重复的一次直接忽略（以前会弹「gost 已在运行」的错误提示）
+	if !a.beginOp() {
+		return
+	}
+	defer a.endOp()
+
 	s := a.st.Get()
 	id := s.Current
 	if id == "" {
@@ -624,6 +631,10 @@ func portInUse(addr string) bool {
 
 // stopGost 统一停止入口：停进程并清理 PID 记录。
 func (a *app) stopGost() {
+	if !a.beginOp() {
+		return
+	}
+	defer a.endOp()
 	if err := a.pm.Stop(); err != nil {
 		a.toast(tr("停止失败: ", "Stop failed: ")+err.Error(), "error")
 		return

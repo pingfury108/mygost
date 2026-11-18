@@ -120,9 +120,24 @@ func (m *Manager) SetOnLine(fn func(line string)) {
 // Start 以 bin -C config 启动 gost。
 func (m *Manager) Start(bin, config string) error {
 	m.mu.Lock()
+	// 状态可能滞后：进程已退出但 watch 还没把 state 改回 Crashed。
+	// 用 exited 通道确认真正存活，否则会误报「已在运行」。
 	if m.state == Running {
-		m.mu.Unlock()
-		return ErrAlreadyRunning
+		ch := m.exited
+		alive := true
+		if ch != nil {
+			select {
+			case <-ch:
+				alive = false
+			default:
+			}
+		}
+		if alive {
+			m.mu.Unlock()
+			return ErrAlreadyRunning
+		}
+		m.state = Stopped
+		m.cmd, m.cancel, m.exited = nil, nil, nil
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cmd := exec.CommandContext(ctx, bin, "-C", config)

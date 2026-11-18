@@ -80,6 +80,19 @@ MYGOST_DATA_DIR=/Volumes/Data/mygost # macOS
 开发版（`mygo dev`）自动用 `mygost-dev`，与正式版完全隔离（配置、进程、规则各管各的）。
 设置页「关于」显示实际路径与来源，可点击打开。
 
+## 排查
+
+启动异常时先看日志文件：
+
+| 平台 | 路径 |
+|---|---|
+| Windows | `%APPDATA%\mygost\logs\mygost.log` |
+| macOS | `~/Library/Application Support/mygost/logs/mygost.log` |
+
+日志从进程启动第一行开始记录（exe 路径、工作目录、参数、单实例锁、窗口创建），
+双击启动无反应时，看这份日志就能判断是没启动、被单实例挡住，还是窗口没建出来。
+设置页「关于 → 运行日志」可直接打开所在目录。
+
 ## 目录结构
 
 ```

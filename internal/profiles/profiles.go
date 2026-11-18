@@ -378,6 +378,11 @@ func (s *Store) SaveSplit(p *Profile, sc SplitConfig) (string, error) {
 	if strings.TrimSpace(p.Name) == "" {
 		p.Name = "未命名"
 	}
+	// 规范化监听地址：手填 "8085" 会补成 ":8085"，
+	// 缺端口/端口非法的直接拒绝，免得存进配置后启动才报错
+	if err := p.Normalize(); err != nil {
+		return "", err
+	}
 	yaml, err := p.BuildYAMLSplit(sc)
 	if err != nil {
 		return "", err

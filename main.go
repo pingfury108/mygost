@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/egoist/mygo"
@@ -117,6 +118,10 @@ type app struct {
 	// splitSup 是分流插件的唯一管理者（启停只走它，UI 不碰）
 	splitSup *splitSupervisor
 
+	// opMu/opBusy 串行化启动与停止：自动启动与用户点击可能并发
+	opMu   sync.Mutex
+	opBusy bool
+
 	// dataDirSrc 说明数据目录来自哪里（系统默认 / 自定义 / 环境变量）
 	dataDirSrc string
 	// dataDirWarn 是回退到默认目录的原因（自定义目录不可用时非空）
@@ -205,9 +210,28 @@ func isNetworkPath(p string) bool {
 }
 
 func main() {
+	// 最早的日志：GUI 子系统下没有控制台，双击启动失败时这里是唯一线索。
+	// 必须在 mygo 初始化之前就落下，否则崩溃/卡在框架里就什么都看不到。
+	bootDir, _, bootWarn := resolveDataDir()
+	bootLog, closeBootLog := setupLogging(bootDir)
+	defer closeBootLog()
+	if exe, err := os.Executable(); err == nil {
+		log.Printf("启动：exe=%s", exe)
+	}
+	if wd, err := os.Getwd(); err == nil {
+		log.Printf("      cwd=%s", wd)
+	}
+	log.Printf("      args=%v", os.Args)
+	if bootWarn != "" {
+		log.Printf("      %s", bootWarn)
+	}
+
 	if !mygo.App.RequestSingleInstanceLock() {
+		log.Printf("已有实例在运行：唤起它的窗口后退出")
 		return
 	}
+	log.Printf("单实例锁已获取")
+
 	// 应用以中英两种语言书写：框架内建字符串（菜单角色名等）跟随系统语言
 	mygo.App.SetLanguages("en", "zh-Hans")
 	a := newApp()
@@ -215,7 +239,7 @@ func main() {
 	// 让 mygo 自己的用户数据（window-state.json 等）也落在我们选的目录，
 	// 否则自定义数据目录后它仍会写到系统默认位置
 	mygo.App.SetPath(mygo.PathUserData, dataDir)
-	a.logPath, _ = setupLogging(dataDir)
+	a.logPath = bootLog
 	// 网络位置（UNC）上直接执行解压出的 gost.exe 常被系统拦住，
 	// 提前说清楚比事后让用户猜要好
 	if isNetworkPath(dataDir) {
@@ -256,6 +280,7 @@ func main() {
 			MinHeight: 520,
 			Content:   ui.View(a.view),
 		})
+		log.Printf("窗口已创建：%dx%d", 430, 660)
 		// 关窗口只是收起：应用继续待在菜单栏，gost 也继续运行。
 		// 真正退出走菜单栏「退出 mygost」（⌘Q）。
 		// Quit 流程会关闭所有窗口，此时必须放行，否则退出被卡死
@@ -387,3 +412,21 @@ func (a *app) toast(title, typ string) {
 
 // appVersion 是应用版本，与 mygo.json 保持一致（发布时同步修改）。
 const appVersion = "0.2.2"
+
+// beginOp 尝试占用启停操作槽；已有操作在进行时返回 false。
+func (a *app) beginOp() bool {
+	a.opMu.Lock()
+	defer a.opMu.Unlock()
+	if a.opBusy {
+		return false
+	}
+	a.opBusy = true
+	return true
+}
+
+// endOp 释放启停操作槽。
+func (a *app) endOp() {
+	a.opMu.Lock()
+	a.opBusy = false
+	a.opMu.Unlock()
+}
