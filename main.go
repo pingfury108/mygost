@@ -421,7 +421,7 @@ func (a *app) toast(title, typ string) {
 }
 
 // appVersion 是应用版本，与 mygo.json 保持一致（发布时同步修改）。
-const appVersion = "0.2.3"
+const appVersion = "0.2.4"
 
 // beginOp 尝试占用启停操作槽；已有操作在进行时返回 false。
 func (a *app) beginOp() bool {
