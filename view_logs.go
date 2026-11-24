@@ -15,19 +15,24 @@ func (a *app) viewLogs(c *ui.Context) {
 		return
 	}
 	t := c.Theme()
-	lines := a.pm.Lines(0)
-	shown := lines
+	total := a.pm.LogLen()
+	var shown []string
 	if q := strings.TrimSpace(a.logFilter); q != "" {
+		ql := strings.ToLower(q)
+		lines := a.pm.Lines(0)
 		shown = make([]string, 0, len(lines))
 		for _, l := range lines {
-			if strings.Contains(strings.ToLower(l), strings.ToLower(q)) {
+			if containsFold(l, ql) {
 				shown = append(shown, l)
 			}
 		}
-	}
-	// 只渲染最近 300 行，避免超长帧构建
-	if len(shown) > 300 {
-		shown = shown[len(shown)-300:]
+		// 只渲染最近 300 行，避免超长帧构建
+		if len(shown) > 300 {
+			shown = shown[len(shown)-300:]
+		}
+	} else {
+		// 无过滤时只复制要渲染的部分，不再复制全部 5000 行。
+		shown = a.pm.Lines(300)
 	}
 	running := false
 	if state, _, _ := a.pm.State(); state == proc.Running {
@@ -62,8 +67,8 @@ func (a *app) viewLogs(c *ui.Context) {
 			ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(sp2).
 				Padding(0, 0, sp2).Children(func() {
 				label := fmt.Sprintf("%d 行", len(shown))
-				if len(shown) != len(lines) {
-					label = fmt.Sprintf("%d / %d 行", len(shown), len(lines))
+				if len(shown) != total {
+					label = fmt.Sprintf("%d / %d 行", len(shown), total)
 				}
 				ui.Text(c, label).FontSize(fsCaption).TextColor(t.TextMuted).Grow(1)
 				ui.Toggle(c, &a.logFollow, "跟随").FontSize(fsCaption)
@@ -84,8 +89,9 @@ func (a *app) viewLogs(c *ui.Context) {
 						return
 					}
 					// 等宽字体让时间戳对齐；按级别着色
-					grew := len(shown) != a.logSeen
-					a.logSeen = len(shown)
+					seq := a.pm.LogSeq()
+					grew := seq != a.logSeq
+					a.logSeq = seq
 					for i, l := range shown {
 						line := ui.Text(c, l).Font("monospace").FontSize(fsMono).
 							TextColor(logLineColor(t, l))
@@ -106,4 +112,32 @@ func joinLines(lines []string) string {
 		return ""
 	}
 	return strings.Join(lines, "\n")
+}
+
+// containsFold 是大小写不敏感的 Contains，只折叠 ASCII 且不分配。
+//
+// 日志过滤每帧要扫最多 5000 行；strings.ToLower 每行都会分配，
+// 快速输入时会造成明显 GC 压力。sub 需已转为小写。
+func containsFold(s, sub string) bool {
+	if sub == "" {
+		return true
+	}
+	n := len(sub)
+	for i := 0; i+n <= len(s); i++ {
+		match := true
+		for j := 0; j < n; j++ {
+			c := s[i+j]
+			if 'A' <= c && c <= 'Z' {
+				c += 'a' - 'A'
+			}
+			if c != sub[j] {
+				match = false
+				break
+			}
+		}
+		if match {
+			return true
+		}
+	}
+	return false
 }

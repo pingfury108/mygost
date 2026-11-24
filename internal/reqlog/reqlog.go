@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -57,7 +58,10 @@ type Log struct {
 	next  int
 	full  bool
 	sids  map[string]int // sid → 下标，用于把 route 行补进同一条
-	on    bool
+	revs  []uint64       // 每个槽位最后修改的序号
+	rev   uint64         // 单调递增的修改序号
+	done  uint64         // Flush 已处理的序号
+	on    atomic.Bool
 	now   func() time.Time
 	store *Store // 持久化；nil 表示不落盘
 }
@@ -67,12 +71,14 @@ func New(capacity int) *Log {
 	if capacity <= 0 {
 		capacity = 500
 	}
-	return &Log{
+	l := &Log{
 		buf:  make([]Entry, capacity),
 		sids: make(map[string]int),
-		on:   true,
+		revs: make([]uint64, capacity),
 		now:  time.Now,
 	}
+	l.on.Store(true)
+	return l
 }
 
 // SetStore 挂上持久化后端；nil 表示只留内存。
@@ -90,15 +96,52 @@ func (l *Log) Flush() {
 	if l == nil {
 		return
 	}
-	entries := l.Entries(0)
 	s := l.storeRef()
 	if s == nil {
 		return
 	}
+	entries := l.changed()
 	for _, e := range entries {
 		s.Append(e)
 	}
 	s.Flush()
+}
+
+// changed 返回上次 Flush 之后新建或更新过的记录（时间升序）。
+//
+// 记录会在内存里被后续日志行补全（node/err），所以不能只取“最新一条”；
+// 但也不能每 500ms 把整个环形缓冲重新格式化查重。rev 让 Flush 只碰
+// 真正变化过的记录——空闲或低速时几乎是空操作。
+func (l *Log) changed() []Entry {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.rev == l.done {
+		return nil
+	}
+	total := l.next
+	if l.full {
+		total = len(l.buf)
+	}
+	out := make([]Entry, 0, total)
+	maxRev := l.done
+	start := l.next - total
+	if start < 0 {
+		start += len(l.buf)
+	}
+	for i := 0; i < total; i++ {
+		idx := start + i
+		if idx >= len(l.buf) {
+			idx -= len(l.buf)
+		}
+		if r := l.revs[idx]; r > l.done {
+			out = append(out, l.buf[idx])
+			if r > maxRev {
+				maxRev = r
+			}
+		}
+	}
+	l.done = maxRev
+	return out
 }
 
 // Store 返回持久化后端（可能为 nil）。
@@ -121,7 +164,7 @@ func (l *Log) SetEnabled(on bool) {
 		return
 	}
 	l.mu.Lock()
-	l.on = on
+	l.on.Store(on)
 	l.mu.Unlock()
 }
 
@@ -132,7 +175,7 @@ func (l *Log) Enabled() bool {
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	return l.on
+	return l.on.Load()
 }
 
 // Entries 返回最近的记录（时间升序）。max<=0 表示全部。
@@ -142,13 +185,25 @@ func (l *Log) Entries(max int) []Entry {
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	var out []Entry
+	total := l.next
 	if l.full {
-		out = append(out, l.buf[l.next:]...)
+		total = len(l.buf)
 	}
-	out = append(out, l.buf[:l.next]...)
-	if max > 0 && len(out) > max {
-		out = out[len(out)-max:]
+	if total == 0 {
+		return nil
+	}
+	n := total
+	if max > 0 && n > max {
+		n = max
+	}
+	start := l.next - n
+	if start < 0 {
+		start += len(l.buf)
+	}
+	out := make([]Entry, n)
+	copied := copy(out, l.buf[start:])
+	if copied < n {
+		copy(out[copied:], l.buf[:n-copied])
 	}
 	return out
 }
@@ -178,17 +233,20 @@ func (l *Log) Len() int {
 }
 
 // Feed 送入一行原始日志（proc 的时间戳前缀已去除）。
-func (l *Log) Feed(line string) {
-	if l == nil || !l.Enabled() {
-		return
+// 返回 true 表示这行参与了请求归并，调用方可据此刷新视图；
+// 高频路径不再额外查询 Len/最后一条记录。
+func (l *Log) Feed(line string) bool {
+	if l == nil || !l.on.Load() {
+		return false
 	}
 	msg, sid := extract(line)
 	if msg == "" {
-		return
+		return false
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.applyLocked(msg, sid)
+	return true
 }
 
 // applyLocked 根据一条 msg 更新记录。
@@ -238,6 +296,19 @@ func (l *Log) applyRouteLocked(msg, sid string) {
 
 // extract 从一行 JSON 日志里取出 msg 与 sid。
 func extract(line string) (msg, sid string) {
+	// 只有这三类日志参与请求归并；先做廉价判断，
+	// 避免对每条 debug 日志（约 11 行/请求）都做一次 json.Unmarshal。
+	if !strings.Contains(line, `"msg":"bypass: `) &&
+		!strings.Contains(line, `"msg":"proxy: `) &&
+		!strings.Contains(line, `"msg":"route(retry=`) {
+		return "", ""
+	}
+	// gost 的日志是 encoding/json 生成的紧凑单行 JSON。
+	// 直接取字符串字段可省掉每条匹配日志的反射解码；格式异常时再回退。
+	if m, ok := rawJSONString(line, "msg"); ok {
+		s, _ := rawJSONString(line, "sid")
+		return m, s
+	}
 	i := strings.Index(line, "{")
 	if i < 0 {
 		return "", ""
@@ -250,6 +321,25 @@ func extract(line string) (msg, sid string) {
 		return "", ""
 	}
 	return payload.Msg, payload.SID
+}
+
+// rawJSONString 从紧凑 JSON 行里取出字符串字段，不处理转义（调用方遇反斜杠回退）。
+func rawJSONString(line, key string) (string, bool) {
+	marker := `"` + key + `":"`
+	i := strings.Index(line, marker)
+	if i < 0 {
+		return "", false
+	}
+	start := i + len(marker)
+	for j := start; j < len(line); j++ {
+		switch line[j] {
+		case '\\':
+			return "", false // 含转义，交给 encoding/json
+		case '"':
+			return line[start:j], true
+		}
+	}
+	return "", false
 }
 
 // trimAfter 去掉 ", whitelist: false" 之类的后缀。
@@ -287,18 +377,15 @@ func (l *Log) upsertLocked(sid, target string, dec Decision) {
 		if dec != Unknown {
 			e.Decision = dec
 		}
+		l.touchLocked(idx)
 		return
 	}
 	e := Entry{At: l.now(), Target: target, SID: sid, Decision: dec}
-	idx := l.next
+	idx := l.nextSlotLocked()
 	l.buf[idx] = e
+	l.touchLocked(idx)
 	if sid != "" {
 		l.sids[sid] = idx
-	}
-	l.next++
-	if l.next >= len(l.buf) {
-		l.next = 0
-		l.full = true
 	}
 }
 
@@ -306,6 +393,7 @@ func (l *Log) upsertLocked(sid, target string, dec Decision) {
 func (l *Log) setNodeLocked(sid, node string) {
 	if idx, ok := l.sids[sid]; ok && sid != "" {
 		l.buf[idx].Node = node
+		l.touchLocked(idx)
 	}
 }
 
@@ -316,17 +404,39 @@ func (l *Log) setErrLocked(sid, reason string) {
 		if l.buf[idx].Decision == Unknown {
 			l.buf[idx].Decision = Proxied
 		}
+		l.touchLocked(idx)
 		return
 	}
 	e := Entry{At: l.now(), SID: sid, Err: reason, Decision: Proxied}
-	idx := l.next
+	idx := l.nextSlotLocked()
 	l.buf[idx] = e
+	l.touchLocked(idx)
 	if sid != "" {
 		l.sids[sid] = idx
+	}
+}
+
+// touchLocked 标记槽位在本次 Flush 后发生了变化。
+func (l *Log) touchLocked(idx int) {
+	l.rev++
+	l.revs[idx] = l.rev
+}
+
+// nextSlotLocked 返回下一个写入槽位，并清掉即将被覆盖记录的 sid 索引。
+//
+// sids 只为「把同一次请求的多行日志归并成一条」服务；槽位被复用时若不删除
+// 旧 sid，map 会随请求数无限增长（长跑几天可达几万项）。
+func (l *Log) nextSlotLocked() int {
+	idx := l.next
+	if old := l.buf[idx].SID; old != "" {
+		if mapped, ok := l.sids[old]; ok && mapped == idx {
+			delete(l.sids, old)
+		}
 	}
 	l.next++
 	if l.next >= len(l.buf) {
 		l.next = 0
 		l.full = true
 	}
+	return idx
 }

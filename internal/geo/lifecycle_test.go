@@ -4,11 +4,15 @@ import (
 	"context"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/go-gost/plugin/bypass/proto"
+	"google.golang.org/grpc"
 	"mygost/internal/splitbin"
+	"mygost/internal/splitd"
 )
 
 // 端口被其他程序占用时应自动换端口，而不是启动失败。
@@ -50,12 +54,8 @@ func TestStartReusesExistingInstance(t *testing.T) {
 	writeRuleFiles(t, dir)
 
 	m := NewManager(dir, 18152)
-	// 假装"上次遗留的插件"正监听
-	ln, err := net.Listen("tcp", "127.0.0.1:18152")
-	if err != nil {
-		t.Skipf("无法占用测试端口: %v", err)
-	}
-	defer ln.Close()
+	// 模拟"上次遗留的插件"：必须是真正的 Bypass gRPC 服务。
+	startBypassServer(t, "127.0.0.1:18152")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -83,17 +83,51 @@ func TestAliveFalseWhenNothingListens(t *testing.T) {
 	}
 }
 
+// 普通 TCP 服务占用端口时不能被误判为分流插件。
+func TestAliveRejectsNonPluginListener(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:18157")
+	if err != nil {
+		t.Skipf("无法占用测试端口: %v", err)
+	}
+	defer ln.Close()
+
+	m := NewManager(t.TempDir(), 18157)
+	if m.Alive() {
+		t.Error("非 gRPC 服务不应被当成插件")
+	}
+}
+
+// 自有进程活着但 gRPC 尚未就绪（或已卡死）时，不能算插件可用。
+func TestAliveRequiresReadyPlugin(t *testing.T) {
+	cmd := exec.Command("sleep", "5")
+	if err := cmd.Start(); err != nil {
+		t.Skipf("无法启动占位进程: %v", err)
+	}
+	defer func() {
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+	}()
+
+	m := NewManager(t.TempDir(), 18159)
+	m.mu.Lock()
+	m.cmd = cmd
+	m.exited = make(chan struct{})
+	m.mu.Unlock()
+	if !m.Running() {
+		t.Fatal("测试进程应显示为运行中")
+	}
+	if m.Alive() {
+		t.Error("进程存活但没有 gRPC 服务时不应报告可用")
+	}
+}
+
 // Stop 不应误杀复用的外部实例。
 func TestStopLeavesExternalInstance(t *testing.T) {
 	dir := t.TempDir()
 	writeRuleFiles(t, dir)
 	m := NewManager(dir, 18154)
 
-	ln, err := net.Listen("tcp", "127.0.0.1:18154")
-	if err != nil {
-		t.Skipf("无法占用测试端口: %v", err)
-	}
-	defer ln.Close()
+	startBypassServer(t, "127.0.0.1:18154")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -108,6 +142,28 @@ func TestStopLeavesExternalInstance(t *testing.T) {
 	if err := m.ForceStop(); err == nil {
 		t.Error("ForceStop 应提示端口上仍有外部实例")
 	}
+}
+
+// startBypassServer 在 addr 上启动一个最小的 Bypass gRPC 服务。
+func startBypassServer(t *testing.T, addr string) {
+	t.Helper()
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		t.Skipf("无法占用测试端口: %v", err)
+	}
+	gs := grpc.NewServer()
+	proto.RegisterBypassServer(gs, splitd.NewServer(splitd.New(splitd.PolicyProxy)))
+	go gs.Serve(ln)
+	t.Cleanup(gs.Stop)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if bypassReachable(addr) {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("Bypass 测试服务未就绪")
 }
 
 // writeRuleFiles 写最小可用的规则文件，让 Start 通过 Ready 检查。
@@ -136,6 +192,9 @@ func TestPluginSurvivesCallerContextCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	if err := m.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
+	}
+	if err := m.WaitReady(ctx, 5*time.Second); err != nil {
+		t.Fatalf("插件未就绪: %v", err)
 	}
 	cancel() // 模拟 ensureGeo 返回时的 defer cancel()
 	t.Cleanup(func() { m.ForceStop() })
@@ -172,6 +231,50 @@ func TestRunningFalseAfterExit(t *testing.T) {
 	if m.Alive() {
 		t.Error("进程已停止且无人监听，Alive 应为 false")
 	}
+}
+
+// 插件崩溃后，下一次 Start 必须能真正拉起新进程，而不是卡在旧 cmd 句柄上。
+func TestStartRecoversAfterPluginExit(t *testing.T) {
+	dir := t.TempDir()
+	writeRuleFiles(t, dir)
+	m := NewManager(dir, 18158)
+	if len(splitbinBin()) == 0 {
+		t.Skip("当前平台未嵌入插件")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := m.Start(ctx); err != nil {
+		t.Fatalf("first start: %v", err)
+	}
+	if err := m.WaitReady(ctx, 10*time.Second); err != nil {
+		t.Fatalf("first ready: %v", err)
+	}
+	m.mu.Lock()
+	cmd := m.cmd
+	m.mu.Unlock()
+	if cmd == nil || cmd.Process == nil {
+		t.Fatal("插件进程句柄为空")
+	}
+	_ = cmd.Process.Kill()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) && m.Running() {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if m.Running() {
+		t.Fatal("插件被杀后仍报告运行中")
+	}
+
+	if err := m.Start(ctx); err != nil {
+		t.Fatalf("restart after crash: %v", err)
+	}
+	if err := m.WaitReady(ctx, 10*time.Second); err != nil {
+		t.Fatalf("restart ready: %v", err)
+	}
+	if !m.Alive() {
+		t.Fatal("重启后插件应可用")
+	}
+	m.ForceStop()
 }
 
 // splitbinBin 暴露嵌入的插件字节（测试用）。

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -120,6 +121,31 @@ func TestFindPrefersDownloadedOverEmbedded(t *testing.T) {
 	}
 	if _, src3, _ := l.Find(manual); src3 != "manual" {
 		t.Errorf("manual should win, got %q", src3)
+	}
+}
+
+// 启动时自动运行与版本检测可能同时查找/解压 gost，定位器必须串行化。
+func TestFindConcurrent(t *testing.T) {
+	l := &Locator{Dir: t.TempDir()}
+	var wg sync.WaitGroup
+	found := make(chan bool, 8)
+	for i := 0; i < cap(found); i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _, err := l.Find("")
+			found <- err == nil
+		}()
+	}
+	wg.Wait()
+	close(found)
+
+	ok := false
+	for v := range found {
+		ok = ok || v
+	}
+	if !ok {
+		t.Skip("当前环境没有可用 gost，仅验证并发路径无崩溃")
 	}
 }
 

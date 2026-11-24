@@ -275,7 +275,7 @@ func (a *app) customForm(c *ui.Context) {
 		})
 		// 实时校验：语法是否正确一眼可见，不用等保存
 		ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(sp2).Children(func() {
-			if yamlValid(a.customBuf.Buffer.String()) {
+			if a.yamlValidCached() {
 				statusDot(c, t.Success, 7)
 				ui.Text(c, tr("YAML 校验通过", "YAML is valid")).FontSize(fsCaption).TextColor(t.TextMuted)
 			} else {
@@ -285,6 +285,22 @@ func (a *app) customForm(c *ui.Context) {
 			}
 		})
 	})
+}
+
+// yamlValidCached 按编辑缓冲版本缓存校验结果。
+//
+// 渲染每帧都会问一次；大 YAML（几十 KB）每帧重新解析会明显拖慢输入。
+func (a *app) yamlValidCached() bool {
+	buf := a.customBuf
+	if buf == nil {
+		return false
+	}
+	ver := buf.Buffer.Version()
+	if a.yamlCheck != buf || a.yamlVer != ver {
+		a.yamlCheck, a.yamlVer = buf, ver
+		a.yamlOK = yamlValid(buf.Buffer.String())
+	}
+	return a.yamlOK
 }
 
 // commandPreview 把当前表单翻译成 gost 命令行，供用户与文档对照。

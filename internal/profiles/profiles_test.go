@@ -27,6 +27,29 @@ func TestBuildYAMLProxy(t *testing.T) {
 	}
 }
 
+func TestBuildYAMLCustom(t *testing.T) {
+	src := "services:\n  - name: raw\n    addr: \":9000\"\n"
+	p := &Profile{Kind: KindCustom, Name: "raw", YAML: src}
+	y, err := p.BuildYAMLSplit(SplitConfig{
+		MetricsAddr: "127.0.0.1:9100",
+		DebugLog:    true,
+		Enabled:     true,
+		PluginAddr:  "127.0.0.1:8100",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(y) != src {
+		t.Fatalf("custom YAML should be preserved verbatim:\n%s", y)
+	}
+}
+
+func TestBuildYAMLCustomRequiresContent(t *testing.T) {
+	if _, err := (&Profile{Kind: KindCustom}).BuildYAML(); err == nil {
+		t.Error("empty custom YAML should fail")
+	}
+}
+
 func TestBuildYAMLForwardMultiTargets(t *testing.T) {
 	p := &Profile{Kind: KindForward, Listen: ":2222", FwdProto: "tcp", Targets: "1.1.1.1:22\n2.2.2.2:22"}
 	y, err := p.BuildYAML()

@@ -6,8 +6,11 @@ import (
 	"fmt"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
+	"time"
 )
 
 // FindByConfig 扫描命令行包含 configPath 的 gost 进程。
@@ -16,7 +19,7 @@ func FindByConfig(configPath string, _ ...string) []int {
 	if strings.TrimSpace(configPath) == "" {
 		return nil
 	}
-	out, err := exec.Command("pgrep", "-f", configPath).Output()
+	out, err := exec.Command("pgrep", "-f", regexp.QuoteMeta(configPath)).Output()
 	if err != nil {
 		return nil
 	}
@@ -67,10 +70,23 @@ func Terminate(pid int) error {
 	if pid <= 0 {
 		return fmt.Errorf("无效 pid")
 	}
-	if err := exec.Command("kill", "-TERM", strconv.Itoa(pid)).Run(); err != nil {
-		return exec.Command("kill", "-9", strconv.Itoa(pid)).Run()
+	if err := syscall.Kill(pid, syscall.SIGTERM); err != nil {
+		if err == syscall.ESRCH {
+			return nil
+		}
+		return syscall.Kill(pid, syscall.SIGKILL)
 	}
-	return nil
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if !ProcessAlive(pid) {
+			return nil
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if !ProcessAlive(pid) {
+		return nil
+	}
+	return syscall.Kill(pid, syscall.SIGKILL)
 }
 
 // processImagePath 返回进程可执行文件路径。

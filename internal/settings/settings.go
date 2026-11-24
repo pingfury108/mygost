@@ -47,10 +47,13 @@ func Load(dir string) (*Store, error) {
 		if os.IsNotExist(err) {
 			return st, nil
 		}
-		return nil, err
+		return st, err
 	}
 	if err := json.Unmarshal(data, &st.s); err != nil {
-		return nil, err
+		// 返回可用的空 Store：损坏的文件不该让应用启动即 panic，
+		// 下一次 Update 会把它覆盖掉。
+		st.s = Settings{}
+		return st, err
 	}
 	return st, nil
 }
@@ -74,5 +77,13 @@ func (st *Store) Update(fn func(*Settings)) error {
 	if err := os.MkdirAll(filepath.Dir(st.path), 0o755); err != nil {
 		return err
 	}
-	return os.WriteFile(st.path, data, 0o644)
+	tmp := st.path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, st.path); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
 }

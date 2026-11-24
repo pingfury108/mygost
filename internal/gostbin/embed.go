@@ -67,6 +67,8 @@ func (l *Locator) LastErr() error {
 	if l == nil {
 		return nil
 	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	return l.lastErr
 }
 

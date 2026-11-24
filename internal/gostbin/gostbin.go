@@ -6,6 +6,7 @@ package gostbin
 import (
 	"archive/tar"
 	"archive/zip"
+	"bytes"
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
@@ -20,6 +21,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"mygost/internal/proc"
@@ -39,6 +41,7 @@ type Progress func(done, total int64)
 
 // Locator 管理二进制的查找与下载，dir 是下载存放目录。
 type Locator struct {
+	mu sync.Mutex
 	// lastErr 记录最近一次解压内置副本的失败原因（供界面显示）
 	lastErr error
 
@@ -60,8 +63,11 @@ func binaryName() string {
 // 已下载副本排在内置之前：用户主动点「下载/更新」应当生效，
 // 否则内置版本会永远盖住它。
 func (l *Locator) Find(manualPath string) (path, source string, err error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
 	if manualPath != "" {
-		if st, e := os.Stat(manualPath); e == nil && !st.IsDir() {
+		if st, e := os.Stat(manualPath); e == nil && !st.IsDir() && st.Size() > 0 {
 			return manualPath, "manual", nil
 		}
 	}
@@ -75,7 +81,7 @@ func (l *Locator) Find(manualPath string) (path, source string, err error) {
 		return p, "path", nil
 	}
 	// 带着内置副本的失败原因返回：Windows 上多半是安全软件拦截写盘
-	if le := l.LastErr(); le != nil {
+	if le := l.lastErr; le != nil {
 		return "", "", fmt.Errorf("%w（内置副本不可用：%v）", ErrNotFound, le)
 	}
 	return "", "", ErrNotFound
@@ -85,7 +91,7 @@ func (l *Locator) Find(manualPath string) (path, source string, err error) {
 // 兼容旧布局：早期版本把下载的二进制直接放在 Dir/gost。
 func (l *Locator) downloadedPath() string {
 	p := filepath.Join(l.Dir, binaryName())
-	if st, e := os.Stat(p); e == nil && !st.IsDir() {
+	if st, e := os.Stat(p); e == nil && !st.IsDir() && st.Size() > 0 {
 		return p
 	}
 	return ""
@@ -235,7 +241,7 @@ func (p *progressReader) Read(b []byte) (int, error) {
 // extractBinary 从 tar.gz 或 zip 中取出 gost 二进制内容。
 func extractBinary(data []byte, isZip bool) ([]byte, error) {
 	if isZip {
-		zr, err := zip.NewReader(strings.NewReader(string(data)), int64(len(data)))
+		zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
 		if err != nil {
 			return nil, err
 		}
@@ -252,7 +258,7 @@ func extractBinary(data []byte, isZip bool) ([]byte, error) {
 		}
 		return nil, fmt.Errorf("压缩包中未找到 gost.exe")
 	}
-	gz, err := gzip.NewReader(strings.NewReader(string(data)))
+	gz, err := gzip.NewReader(bytes.NewReader(data))
 	if err != nil {
 		return nil, err
 	}

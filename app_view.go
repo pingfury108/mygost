@@ -232,8 +232,13 @@ func (a *app) runningProfileID() string {
 	if st, _, _ := a.pm.State(); st != proc.Running {
 		return ""
 	}
-	return a.st.Get().Current
+	if id, ok := a.runningProfile.Load().(string); ok {
+		return id
+	}
+	return ""
 }
+
+func (a *app) setRunningProfile(id string) { a.runningProfile.Store(id) }
 
 // segmentedFill 是等分宽度的分段控件：设计稿里编辑页三个 tab、日志两视图
 // 都要求各段均分整行。

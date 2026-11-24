@@ -112,6 +112,10 @@ var NoSplit = SplitConfig{}
 //
 // 两者由 split-direct 组合，挂在 hop 上：命中即跳过上游，由本机直连。
 func (p *Profile) BuildYAMLSplit(sc SplitConfig) ([]byte, error) {
+	// 自定义配置由用户完全掌控，不自动追加 metrics/log/bypass。
+	if p.Kind == KindCustom {
+		return p.BuildYAML()
+	}
 	y, err := p.BuildYAML()
 	if err != nil {
 		return y, err
@@ -167,6 +171,12 @@ func (p *Profile) BuildYAMLSplit(sc SplitConfig) ([]byte, error) {
 }
 
 func (p *Profile) BuildYAML() ([]byte, error) {
+	if p.Kind == KindCustom {
+		if strings.TrimSpace(p.YAML) == "" {
+			return nil, fmt.Errorf("YAML 内容不能为空")
+		}
+		return []byte(p.YAML), nil
+	}
 	if strings.TrimSpace(p.Listen) == "" {
 		return nil, fmt.Errorf("监听地址不能为空")
 	}
@@ -322,11 +332,11 @@ type Store struct {
 func LoadStore(dir string) (*Store, error) {
 	s := &Store{dir: dir}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return nil, err
+		return s, err
 	}
 	matches, err := filepath.Glob(filepath.Join(dir, "*.json"))
 	if err != nil {
-		return nil, err
+		return s, err
 	}
 	for _, m := range matches {
 		data, err := os.ReadFile(m)
@@ -396,11 +406,11 @@ func (s *Store) SaveSplit(p *Profile, sc SplitConfig) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if err := os.WriteFile(s.jsonPath(p.ID), data, 0o644); err != nil {
+	if err := writeFileAtomic(s.jsonPath(p.ID), data, 0o644); err != nil {
 		return "", err
 	}
 	yml := s.yamlPath(p.ID)
-	if err := os.WriteFile(yml, yaml, 0o644); err != nil {
+	if err := writeFileAtomic(yml, yaml, 0o644); err != nil {
 		return "", err
 	}
 	replaced := false
@@ -467,3 +477,16 @@ func (s *Store) YamlPath(id string) string {
 
 func (s *Store) jsonPath(id string) string { return filepath.Join(s.dir, id+".json") }
 func (s *Store) yamlPath(id string) string { return filepath.Join(s.dir, id+".yml") }
+
+// writeFileAtomic 先写临时文件再改名，避免崩溃/断电留下半个 JSON。
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, perm); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
+}

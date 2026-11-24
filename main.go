@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/egoist/mygo"
@@ -38,11 +39,24 @@ type app struct {
 	msp  *metrics.Speed
 	tray *mygo.Tray
 
+	trayIconRunning bool
+	trayIconSet     bool
+	trayStateMu     sync.Mutex
+	trayState       proc.State
+	trayPID         int
+	trayStateSet    bool
+
+	// 残留进程扫描缓存：pgrep 要遍历整张进程表，不能每 2 秒跑一次。
+	leftoverMu   sync.Mutex
+	leftoverAt   time.Time
+	leftoverPids []int
+	leftoverOK   bool
+
 	// 页面导航（窄窗口：主界面 + 推入式子页）
 	page string // main / logs / settings / editor
 
 	// 主界面
-	binPath   string
+	binPath   atomic.Value
 	binSource string
 	binVer    string
 	binFound  bool
@@ -59,6 +73,9 @@ type app struct {
 	formErr    string // 表单内联错误
 	cmdPreview string // 等效命令（只读，每帧重算）
 	customBuf  *editor.State
+	yamlCheck  *editor.State // 上次校验的缓冲（按版本复用结果）
+	yamlVer    uint64
+	yamlOK     bool
 	upSeg      int      // 代理表单：出网分段 0=直连 1=经上游
 	protoSeg   int      // 代理表单：协议分段 0=http 1=socks5
 	fwdTargets []string // 端口转发表单：目标行（每行一个地址）
@@ -71,7 +88,17 @@ type app struct {
 
 	logFilter string
 	logFollow bool // 自动跟随最新日志（可关闭）
-	logSeen   int  // 上一帧的行数，用于只在新增时滚动
+	logSeq    uint64
+
+	// 请求历史视图缓存：历史文件写完即不变，不能每帧重读整个 JSONL。
+	reqDayEntries []reqlog.Entry
+	reqDayLoaded  string
+	reqDayLoading string
+	reqDayCount   int
+
+	// reqInvalidateAt 是请求视图上次重绘时间（UnixNano），高频日志下合并重绘。
+	reqInvalidateAt     atomic.Int64
+	reqInvalidateQueued atomic.Bool
 
 	// 主题安装状态（跟随系统深浅色）
 	themeApplied bool
@@ -87,11 +114,16 @@ type app struct {
 	testResByID map[string][]probe.Result // 各配置的测试结果（内联显示）
 	metricsOK   bool                      // 是否成功抓到数据
 	rates       metrics.Rates             // 最近一次速率
-	metricsPort int                       // gost metrics 端口（0=未启用）
+	metricsPort atomic.Int32              // gost metrics 端口（0=未启用）
+	metricsGen  atomic.Int64              // 采样器代际，重启时淘汰旧循环
 	stats       *metrics.Store            // 按天流量统计
 	statsSaved  time.Time                 // 上次落盘时间
 	sessBase    metrics.Snapshot          // 会话基准（累加增量的起点）
 	hasSessBase bool
+
+	// runningProfile 是实际启动/接管的配置 ID。当前选中项可以随后改变，
+	// 但"正在运行的是谁"不能跟着变。
+	runningProfile atomic.Value
 
 	// 待展示的 toast（视图构建时 flush 到窗口）
 	pendingToasts []ui.Toast
@@ -149,6 +181,11 @@ type viewModel struct {
 	ipCount     int       // IP 规则数
 	rulesReady  bool      // 两份规则文件均已下载
 	rulesAt     time.Time // 规则文件更新时间（取较新的一份）
+	ipAt        time.Time // IP 列表更新时间
+	domainAt    time.Time // 域名列表更新时间
+	reqDays     []string  // 可回看的请求记录日期
+	reqToday    int       // 今日已写记录数
+	reqLimit    int       // 单日记录上限
 }
 
 var dataDir string
@@ -328,12 +365,21 @@ func main() {
 	})
 	mygo.App.OnBeforeQuit(func(e *mygo.QuitEvent) {
 		a.quitting = true // 放行 OnClose 的窗口隐藏拦截
+		a.saveSettings()  // 防抖计时器可能还没触发，退出前补一次
 		a.flushRequests() // 请求记录落盘并关闭
+		a.stopMetrics()   // 停采样并保存最后一次流量统计
+		if a.stats != nil {
+			if err := a.stats.Save(); err != nil {
+				log.Printf("退出时保存流量统计失败: %v", err)
+			}
+		}
 		// 插件跟随 gost：gost 保留时插件也必须保留，
 		// 否则 gost 的 split-geo 会指向一个无人监听的端口，
 		// 白名单模式下降级为"全部走代理"。
 		if !a.st.Get().KeepOnExit {
-			a.pm.StopAndWait(3 * time.Second)
+			if err := a.pm.StopAndWait(3 * time.Second); err != nil {
+				log.Printf("退出时停止 gost 失败: %v", err)
+			}
 			if a.splitSup != nil {
 				a.splitSup.StopIfUnwanted()
 			} else {
@@ -350,7 +396,9 @@ func main() {
 func newApp() *app {
 	// 开发版与正式版用不同数据目录：两者各自的 gost/插件/配置互不干扰，
 	// 否则 dev 启动的实例会接管（或误杀）正式版在跑的进程。
-	dataDir, dirSrc, dirWarn := resolveDataDir()
+	// 必须写入包级 dataDir：main 里的 SetPath/日志/状态目录等都用它。
+	var dirSrc, dirWarn string
+	dataDir, dirSrc, dirWarn = resolveDataDir()
 	if dirWarn != "" {
 		log.Printf("%s", dirWarn)
 	}
@@ -375,7 +423,15 @@ func newApp() *app {
 		mc:          metrics.NewClient(""),
 		msp:         metrics.NewSpeed(5),
 	}
-	a.reqs = reqlog.New(500)
+	// 持久化的分流策略必须在插件启动前生效，否则重启后退回默认“走代理”。
+	if st.Get().SplitPolicy == "resolve" {
+		a.geoM.SetPolicy(geo.PolicyResolve)
+	}
+	// 5000 条配合 500ms 落盘，可覆盖约 1 万请求/秒的突发，
+	// 不会在写盘前被环形缓冲覆盖；界面仍只展示最近部分。
+	a.reqs = reqlog.New(5000)
+	// 只有开启“记录请求明细”时才解析 debug 日志（gost 侧也才会输出）。
+	a.reqs.SetEnabled(st.Get().RequestLog)
 	a.initRequestStore(filepath.Join(dataDir, "requests"))
 	a.pm = proc.NewManager(a.onProcEvent)
 	a.pm.SetOnLine(a.feedRequest)
@@ -387,12 +443,25 @@ func newApp() *app {
 	return a
 }
 
-// onProcEvent 在后台 goroutine 被调用：切回主线程刷新界面与托盘。
+// onProcEvent 在后台 goroutine 被调用：日志行或进程状态变化后刷新界面。
+//
+// 日志行很密（debug 下每请求约 11 行），托盘菜单却只在进程状态变化时
+// 需要重建；否则连跑几小时会一直在主线程造原生菜单。
 func (a *app) onProcEvent() {
 	if a.win == nil {
 		return
 	}
-	a.win.Update(func() { a.refreshTray() })
+	st, _, _ := a.pm.State()
+	pid := a.pm.Pid()
+	a.trayStateMu.Lock()
+	changed := !a.trayStateSet || st != a.trayState || pid != a.trayPID
+	a.trayState, a.trayPID, a.trayStateSet = st, pid, true
+	a.trayStateMu.Unlock()
+	if changed {
+		a.win.Update(func() { a.refreshTray() })
+		return
+	}
+	a.win.Invalidate()
 }
 
 // runningLabel 返回运行状态文案：接管进程额外标注。
@@ -418,6 +487,15 @@ func (a *app) toast(title, typ string) {
 	a.win.Update(func() {
 		a.pendingToasts = append(a.pendingToasts, ui.Toast{Title: title, Type: typ})
 	})
+}
+
+// applyUI 把状态变更切到主线程；无窗口（测试）时直接执行。
+func (a *app) applyUI(fn func()) {
+	if a.win != nil {
+		a.win.Update(fn)
+		return
+	}
+	fn()
 }
 
 // appVersion 是应用版本，与 mygo.json 保持一致（发布时同步修改）。

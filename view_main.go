@@ -49,6 +49,10 @@ func (a *app) viewDashboard(c *ui.Context) {
 	running := state == proc.Running
 	runningID := a.runningProfileID()
 	current := a.st.Get().Current
+	shownID := current
+	if running && runningID != "" {
+		shownID = runningID
+	}
 
 	ui.Column(c).Fill().Children(func() {
 		// ── 顶部状态条：品牌 + 连接状态（时长用等宽）──
@@ -106,7 +110,7 @@ func (a *app) viewDashboard(c *ui.Context) {
 			})
 
 			// 当前配置名与摘要：让"连的是谁"一眼可见
-			if p := a.currentProfile(); p != nil {
+			if p := a.ps.Get(shownID); p != nil {
 				ui.Column(c).AlignItems(ui.Center).Padding(sp3+2, 0, 0).Gap(1).Children(func() {
 					ui.Text(c, p.Name).FontSize(fsEmphasis).Bold()
 					ui.Text(c, p.Summary()).FontSize(fsCaption).
@@ -433,27 +437,44 @@ func (a *app) doStart() {
 		return
 	}
 	defer a.endOp()
+	a.startCurrent()
+}
 
+// startCurrent 启动当前选中的配置。调用方必须已持有启停操作槽。
+func (a *app) startCurrent() bool { return a.startCurrentNotify(true) }
+
+// startCurrentNotify 启动当前配置；notify=false 时用于失败回滚，
+// 不弹连接成功/失败提示，避免覆盖真正的错误原因。
+func (a *app) startCurrentNotify(notify bool) bool {
 	s := a.st.Get()
 	id := s.Current
 	if id == "" {
-		a.toast("请先选择一个配置", "error")
-		return
+		if notify {
+			a.toast("请先选择一个配置", "error")
+		}
+		return false
 	}
 	bin, _, err := a.loc.Find(s.GostPath)
 	if err != nil {
-		a.win.Update(func() { a.binFound = false })
-		a.toast("未找到 gost，请先下载", "error")
-		return
+		a.applyUI(func() { a.binFound = false })
+		if notify {
+			a.toast("未找到 gost，请先下载", "error")
+		}
+		return false
 	}
 
+	p := a.ps.Get(id)
 	// 分流开启：先确保插件就绪，拿到真实地址（8100 被占时会换端口，
 	// 配置里的 split-geo 必须指向它）
 	pluginAddr := a.geoM.Addr()
-	if s.Split {
+	splitEnabled := s.Split && p != nil && p.Kind != profiles.KindCustom
+	if splitEnabled {
 		addr, err := a.ensureGeo()
 		if err != nil {
-			a.toast(tr("分流不可用，按无分流启动: ", "Routing unavailable, starting without it: ")+err.Error(), "error")
+			splitEnabled = false
+			if notify {
+				a.toast(tr("分流不可用，按无分流启动: ", "Routing unavailable, starting without it: ")+err.Error(), "error")
+			}
 		} else if addr != "" {
 			pluginAddr = addr
 		}
@@ -462,67 +483,86 @@ func (a *app) doStart() {
 	// ① 已有同一个配置的 gost 在跑？直接接管（上次会话残留）
 	if pid, started, ok := a.findOwn(id); ok {
 		if err := a.pm.Attach(pid, started); err != nil {
-			a.toast(tr("接管失败: ", "Attach failed: ")+err.Error(), "error")
-			return
+			if notify {
+				a.toast(tr("接管失败: ", "Attach failed: ")+err.Error(), "error")
+			}
+			return false
 		}
+		a.setRunningProfile(id)
 		// 接管的进程也要挂上 metrics 抓取，否则已连接却看不到速率卡
 		if port, ok := metricsPortFromYaml(a.ps.YamlPath(id)); ok {
 			a.startMetrics(port)
 		}
-		a.toast(tr("已接管上次运行的 gost", "Attached to the running gost"), "success")
-		return
+		if notify {
+			a.toast(tr("已接管上次运行的 gost", "Attached to the running gost"), "success")
+		}
+		a.applyUI(a.refreshViewModel)
+		return true
 	}
 
 	// ② 端口被占用：先判断是不是我们自己的另一个配置
-	if p := a.ps.Get(id); p != nil {
+	if p != nil {
 		if addr := probeAddr(p.Listen); addr != "" && portInUse(addr) {
 			port := listenPort(p.Listen)
 			ownerPid, ownerName := proc.PortOwner(port)
 			if ownerName == "" && ownerPid == 0 {
-				a.toast(tr("端口 ", "Port ")+p.Listen+tr(" 已被占用", " is in use"), "error")
-				return
+				if notify {
+					a.toast(tr("端口 ", "Port ")+p.Listen+tr(" 已被占用", " is in use"), "error")
+				}
+				return false
 			}
 			// 占用者是我们启动的 gost（命令行含配置目录）
 			if a.isOurGost(ownerPid) {
-				a.toast(tr("端口 ", "Port ")+p.Listen+
-					tr(" 被本应用启动的另一个 gost 占用，请先断开它",
-						" is held by another gost started by mygost; disconnect it first"), "error")
-				return
+				if notify {
+					a.toast(tr("端口 ", "Port ")+p.Listen+
+						tr(" 被本应用启动的另一个 gost 占用，请先断开它",
+							" is held by another gost started by mygost; disconnect it first"), "error")
+				}
+				return false
 			}
 			who := ownerName
 			if who == "" {
 				who = fmt.Sprintf("pid %d", ownerPid)
 			}
-			a.toast(tr("端口 ", "Port ")+p.Listen+tr(" 被 ", " is held by ")+who+
-				tr(" 占用", ""), "error")
-			return
+			if notify {
+				a.toast(tr("端口 ", "Port ")+p.Listen+tr(" 被 ", " is held by ")+who+
+					tr(" 占用", ""), "error")
+			}
+			return false
 		}
 	}
 
 	// 选一个可用的 metrics 端口（用于流量统计），失败则不启用统计
-	metricsPort, portErr := metrics.PickPort(9100, 10)
+	metricsPort := 0
 	metricsAddr := ""
-	if portErr == nil {
-		metricsAddr = "127.0.0.1:" + strconv.Itoa(metricsPort)
+	if p != nil && p.Kind != profiles.KindCustom {
+		if port, err := metrics.PickPort(9100, 10); err == nil {
+			metricsPort = port
+			metricsAddr = "127.0.0.1:" + strconv.Itoa(metricsPort)
+		}
 	}
 
 	// 运行前按当前分流开关重写 yml（保存时的开关可能已变）
-	if p := a.ps.Get(id); p != nil {
+	if p != nil {
 		sc := profiles.SplitConfig{
-			Enabled: s.Split, PluginAddr: pluginAddr,
+			Enabled: splitEnabled, PluginAddr: pluginAddr,
 			PrivateMatchers: geo.PrivateMatchers, MetricsAddr: metricsAddr,
 			// 请求决策只有 debug 级日志才有；设置里可关闭以省开销
 			DebugLog: s.RequestLog,
 		}
 		if _, err := a.ps.SaveSplit(p, sc); err != nil {
-			a.toast(tr("生成配置失败: ", "Failed to build config: ")+err.Error(), "error")
-			return
+			if notify {
+				a.toast(tr("生成配置失败: ", "Failed to build config: ")+err.Error(), "error")
+			}
+			return false
 		}
 	}
 	yml := a.ps.YamlPath(id)
 	if err := a.pm.Start(bin, yml); err != nil {
-		a.toast(tr("启动失败: ", "Failed: ")+err.Error(), "error")
-		return
+		if notify {
+			a.toast(tr("启动失败: ", "Failed: ")+err.Error(), "error")
+		}
+		return false
 	}
 	// 启动确认：gost 可能刚起来就因配置/端口问题退出，不能立刻报成功
 	if err := a.pm.WaitStable(800 * time.Millisecond); err != nil {
@@ -531,14 +571,21 @@ func (a *app) doStart() {
 		if errors.As(err, &se) {
 			msg = se.Detail()
 		}
-		a.toast(tr("启动失败: ", "Failed: ")+msg, "error")
-		return
+		if notify {
+			a.toast(tr("启动失败: ", "Failed: ")+msg, "error")
+		}
+		return false
 	}
 	a.recordPid(id, bin, yml)
+	a.setRunningProfile(id)
 	if metricsAddr != "" {
 		a.startMetrics(metricsPort)
 	}
-	a.toast(tr("已连接", "Connected"), "success")
+	if notify {
+		a.toast(tr("已连接", "Connected"), "success")
+	}
+	a.applyUI(a.refreshViewModel)
+	return true
 }
 
 // stateDir 存放 PID 等运行期状态。
@@ -606,10 +653,14 @@ func probeAddr(listen string) string {
 	if strings.HasPrefix(listen, ":") {
 		return "127.0.0.1" + listen
 	}
-	if _, _, err := net.SplitHostPort(listen); err != nil {
+	host, port, err := net.SplitHostPort(listen)
+	if err != nil {
 		return ""
 	}
-	return listen
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = "127.0.0.1"
+	}
+	return net.JoinHostPort(host, port)
 }
 
 // portInUse 报告 addr 是否已被监听。
@@ -628,15 +679,26 @@ func (a *app) stopGost() {
 		return
 	}
 	defer a.endOp()
+	a.stopGostLocked()
+}
+
+// stopGostLocked 停止当前配置。调用方必须已持有启停操作槽。
+func (a *app) stopGostLocked() bool {
 	if err := a.pm.Stop(); err != nil {
 		a.toast(tr("停止失败: ", "Stop failed: ")+err.Error(), "error")
-		return
+		return false
 	}
 	a.clearPid()
+	a.setRunningProfile("")
 	a.stopMetrics()
 	// 插件跟随 gost：gost 停了就不再需要它
-	a.splitSup.StopIfUnwanted()
-	a.refreshViewModel()
+	if a.splitSup != nil {
+		a.splitSup.StopIfUnwanted()
+	} else {
+		a.geoM.Stop()
+	}
+	a.applyUI(a.refreshViewModel)
+	return true
 }
 
 // ensureGeo 确保分流插件运行且规则就绪；返回实际监听地址。
@@ -644,6 +706,9 @@ func (a *app) stopGost() {
 // 具体启停由 splitSupervisor 负责（见 split_supervisor.go）；这里只是
 // 给“启动 gost 之前”用的薄封装，因为配置里的 split-geo 需要真实地址。
 func (a *app) ensureGeo() (string, error) {
+	if a.splitSup == nil {
+		return "", fmt.Errorf("分流监管器未初始化")
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	return a.splitSup.Ensure(ctx)
@@ -687,7 +752,8 @@ func (a *app) checkBinAsync() {
 		}
 		a.win.Update(func() {
 			a.binFound = found
-			a.binPath, a.binSource, a.binVer = path, src, ver
+			a.binPath.Store(path)
+			a.binSource, a.binVer = src, ver
 			a.binErr = reason
 		})
 	}()
@@ -740,8 +806,8 @@ func (a *app) gostExeDirs() []string {
 		filepath.Join(dataDir, "bin"),
 		filepath.Join(dataDir, "bin", "embedded"),
 	}
-	if a.binPath != "" {
-		dirs = append(dirs, filepath.Dir(a.binPath))
+	if p, _ := a.binPath.Load().(string); p != "" {
+		dirs = append(dirs, filepath.Dir(p))
 	}
 	s := a.st.Get()
 	if strings.TrimSpace(s.GostPath) != "" {

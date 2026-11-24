@@ -1,12 +1,10 @@
 package main
 
 import (
-	"path/filepath"
 	"runtime"
 	"time"
 
 	"mygost/internal/geo"
-	"mygost/internal/proc"
 )
 
 // ─── 视图状态：重操作与渲染分离 ───────────────────────────────────
@@ -35,18 +33,9 @@ var refreshInterval = func() time.Duration {
 func (a *app) probeViewModel() viewModel {
 	var vm viewModel
 
-	// 插件端口探活：TCP dial 带 syscall 与超时开销
-	// 以“服务可用”为准（含复用的外部实例）
-	vm.splitAlive = a.geoM.Alive()
-
 	// 残留进程：pgrep 会 fork 一个进程，是这几项里最贵的
-	if all := proc.FindByConfig(filepath.Join(dataDir, "profiles"), a.gostExeDirs()...); len(all) > 0 {
-		cur := a.pm.Pid()
-		for _, p := range all {
-			if p != cur {
-				vm.leftovers = append(vm.leftovers, p)
-			}
-		}
+	if pids := a.viewLeftovers(); len(pids) > 0 {
+		vm.leftovers = pids
 	}
 
 	// 插件状态（含实际地址与最近错误，端口可能因占用而变）
@@ -65,6 +54,18 @@ func (a *app) probeViewModel() viewModel {
 	vm.ipCount = a.geoM.CountIP()
 	vm.rulesReady = a.geoM.Ready()
 	vm.rulesAt = latestRuleTime(a.geoM)
+	vm.ipAt = a.geoM.UpdateAt(a.geoM.IPListPath())
+	vm.domainAt = a.geoM.UpdateAt(a.geoM.DomainListPath())
+
+	// 请求记录的日期列表与今日计数也放在后台探测里：
+	// 这些操作会 readdir / 扫描 JSONL，不能出现在渲染路径。
+	if a.reqs != nil {
+		if st := a.reqs.Store(); st != nil {
+			vm.reqDays = st.Days()
+			vm.reqToday = st.DayCount(todayKey())
+			vm.reqLimit = st.Limit()
+		}
+	}
 
 	return vm
 }

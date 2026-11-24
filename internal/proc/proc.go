@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -90,6 +91,7 @@ type Manager struct {
 
 	exited chan struct{} // 每次 Start 新建，进程退出时关闭
 	extPID int           // >0 表示接管的外部进程（非本会话 exec 启动）
+	extAt  time.Time     // 上次校验接管进程存活的时间
 
 	// onLine 可选：每读到一行日志时调用（用于解析请求决策），在 pump 的 goroutine 上执行
 	onLine func(line string)
@@ -98,6 +100,7 @@ type Manager struct {
 	logs    []string
 	logNext int
 	logFull bool
+	logSeq  atomic.Uint64
 
 	notifyMu sync.Mutex
 	pending  bool
@@ -208,17 +211,7 @@ func (m *Manager) WaitStable(d time.Duration) error {
 
 // Stop 手动停止并等待进程退出（最多 timeout，超时放弃等待）。
 func (m *Manager) Stop() error {
-	if err := m.stopAsync(); err != nil {
-		return err
-	}
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		if st, _, _ := m.State(); st != Running {
-			return nil
-		}
-		time.Sleep(30 * time.Millisecond)
-	}
-	return nil
+	return m.StopAndWait(3 * time.Second)
 }
 
 // StopAndWait 同 Stop，可自定义超时。
@@ -233,7 +226,7 @@ func (m *Manager) StopAndWait(timeout time.Duration) error {
 		}
 		time.Sleep(30 * time.Millisecond)
 	}
-	return nil
+	return fmt.Errorf("停止 gost 超时")
 }
 
 // stopAsync 发起停止（不等待）。
@@ -319,6 +312,7 @@ func (m *Manager) Attach(pid int, started time.Time) error {
 		return ErrAlreadyRunning
 	}
 	m.extPID = pid
+	m.extAt = time.Now()
 	m.state = Running
 	m.manual = false
 	m.errStr = ""
@@ -363,15 +357,21 @@ func (m *Manager) State() (State, time.Time, string) {
 	m.mu.Lock()
 	ext := m.extPID
 	st, started, reason := m.state, m.start, m.errStr
+	checkAt := m.extAt
 	m.mu.Unlock()
 
-	// 接管进程可能在外部退出：惰性校验
-	if ext > 0 && st == Running && !ProcessAlive(ext) {
+	// 接管进程可能在外部退出：惰性校验，但最多每秒一次。
+	// State 在视图中每帧都会被调用，不能每帧 fork ps。
+	if ext > 0 && st == Running && time.Since(checkAt) >= time.Second {
+		alive := ProcessAlive(ext)
 		m.mu.Lock()
 		if m.extPID == ext {
-			m.extPID = 0
-			m.state = Stopped
-			m.pushLine("← 接管的进程已退出")
+			m.extAt = time.Now()
+			if !alive {
+				m.extPID = 0
+				m.state = Stopped
+				m.pushLine("← 接管的进程已退出")
+			}
 		}
 		st = m.state
 		m.mu.Unlock()
@@ -383,13 +383,25 @@ func (m *Manager) State() (State, time.Time, string) {
 func (m *Manager) Lines(max int) []string {
 	m.logMu.Lock()
 	defer m.logMu.Unlock()
-	var out []string
+	total := m.logNext
 	if m.logFull {
-		out = append(out, m.logs[m.logNext:]...)
+		total = len(m.logs)
 	}
-	out = append(out, m.logs[:m.logNext]...)
-	if max > 0 && len(out) > max {
-		out = out[len(out)-max:]
+	if total == 0 {
+		return nil
+	}
+	n := total
+	if max > 0 && n > max {
+		n = max
+	}
+	start := m.logNext - n
+	if start < 0 {
+		start += len(m.logs)
+	}
+	out := make([]string, n)
+	copied := copy(out, m.logs[start:])
+	if copied < n {
+		copy(out[copied:], m.logs[:n-copied])
 	}
 	return out
 }
@@ -398,6 +410,20 @@ func (m *Manager) Lines(max int) []string {
 func (m *Manager) LogText() string {
 	return joinLines(m.Lines(0))
 }
+
+// LogLen 返回当前保留的日志行数（不复制内容）。
+func (m *Manager) LogLen() int {
+	m.logMu.Lock()
+	defer m.logMu.Unlock()
+	if m.logFull {
+		return len(m.logs)
+	}
+	return m.logNext
+}
+
+// LogSeq 返回日志写入序号。环形缓冲满后长度不再变化，
+// 但序号仍会递增，界面据此判断是否出现了新日志。
+func (m *Manager) LogSeq() uint64 { return m.logSeq.Load() }
 
 // ClearLogs 清空日志。
 func (m *Manager) ClearLogs() {
@@ -422,19 +448,31 @@ func joinLines(lines []string) string {
 // pump 持续读取子进程输出。
 func (m *Manager) pump(r *os.File) {
 	defer r.Close()
-	sc := bufio.NewScanner(r)
-	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	for sc.Scan() {
-		raw := sc.Text()
-		m.mu.Lock()
-		cb := m.onLine
-		m.mu.Unlock()
-		if cb != nil {
-			cb(raw)
+	// 用 Reader 而不是 Scanner：Scanner 遇到超过上限的长行会直接停止，
+	// 读端随之关闭，gost 再写 stdout 就会收到 EPIPE 并退出。
+	// gost 的 debug 日志正常很短，但不能让一条异常长行把代理打死。
+	br := bufio.NewReaderSize(r, 64*1024)
+	for {
+		line, err := br.ReadString('\n')
+		if line != "" {
+			m.handleLine(strings.TrimSuffix(strings.TrimSuffix(line, "\n"), "\r"))
 		}
-		m.pushLine(raw)
-		m.notifySoon()
+		if err != nil {
+			return
+		}
 	}
+}
+
+// handleLine 把一行输出交给解析回调并写入日志缓冲。
+func (m *Manager) handleLine(raw string) {
+	m.mu.Lock()
+	cb := m.onLine
+	m.mu.Unlock()
+	if cb != nil {
+		cb(raw)
+	}
+	m.pushLine(raw)
+	m.notifySoon()
 }
 
 // watch 等待进程退出并更新状态。
@@ -445,6 +483,7 @@ func (m *Manager) watch(cmd *exec.Cmd, cancel context.CancelFunc) {
 	manual := m.manual
 	m.cmd = nil
 	m.cancel = nil
+	exited := m.exited
 	if manual {
 		m.state = Stopped
 	} else {
@@ -453,11 +492,14 @@ func (m *Manager) watch(cmd *exec.Cmd, cancel context.CancelFunc) {
 			m.errStr = err.Error()
 		}
 	}
+	state := m.state
 	m.mu.Unlock()
-	if ch := m.exited; ch != nil {
-		close(ch)
+	// 必须在锁内取 exited：解锁后 Start 可能已经创建了新通道，
+	// 关闭新通道会让刚启动的进程被误判为「已退出」，再次关闭还会 panic。
+	if exited != nil {
+		close(exited)
 	}
-	m.pushLine(fmt.Sprintf("← 进程退出 (%s)", m.state))
+	m.pushLine(fmt.Sprintf("← 进程退出 (%s)", state))
 	m.notifySoon()
 }
 
@@ -468,6 +510,7 @@ func (m *Manager) pushLine(line string) {
 	ts := time.Now().Format("15:04:05 ")
 	m.logMu.Lock()
 	m.logs[m.logNext] = ts + line
+	m.logSeq.Add(1)
 	m.logNext++
 	if m.logNext >= len(m.logs) {
 		m.logNext = 0

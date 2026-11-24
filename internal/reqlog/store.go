@@ -3,6 +3,7 @@ package reqlog
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -57,10 +58,12 @@ type Store struct {
 	day    string
 	count  int       // 当天已写条数
 	lastAt time.Time // 上次落盘
-	seen   map[string]string
 	// written 记录已落盘的内容指纹，内容变化才追加新行
 	written map[string]string
 	limit   int
+	// counts 缓存历史文件行数：日期文件写完即不变，避免界面每次渲染都扫描 8MB。
+	counts map[string]int
+	closed bool
 }
 
 // OpenStore 打开（或创建）记录目录，并清理过期文件。
@@ -68,7 +71,10 @@ func OpenStore(dir string) (*Store, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
 	}
-	s := &Store{dir: dir, seen: map[string]string{}, written: map[string]string{}, limit: DailyLimit}
+	s := &Store{
+		dir: dir, written: map[string]string{},
+		limit: DailyLimit, counts: map[string]int{},
+	}
 	s.Prune()
 	return s, nil
 }
@@ -96,6 +102,9 @@ func (s *Store) Prune() {
 }
 
 // Append 追加或更新一条记录。同 key 内容变化时会追加新行（读取取最后一行）。
+//
+// 记录需按时间先后到达（Log.Flush 按环形缓冲顺序输出）：文件只向前切天，
+// 已经写到新的一天后，更早的记录视为上一轮已落盘而忽略。
 func (s *Store) Append(e Entry) {
 	if s == nil {
 		return
@@ -109,6 +118,9 @@ func (s *Store) Append(e Entry) {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.closed {
+		return
+	}
 	if s.written[key] == fp {
 		return // 内容未变，不重复写
 	}
@@ -142,6 +154,9 @@ func (s *Store) Flush() {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.closed {
+		return
+	}
 	s.flushLocked()
 }
 
@@ -152,7 +167,11 @@ func (s *Store) Close() error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.flushLocked()
+	if s.closed {
+		return nil
+	}
+	s.syncLocked()
+	s.closed = true
 	if s.f != nil {
 		err := s.f.Close()
 		s.f, s.w = nil, nil
@@ -162,6 +181,16 @@ func (s *Store) Close() error {
 }
 
 func (s *Store) flushLocked() {
+	if s.w != nil {
+		_ = s.w.Flush()
+	}
+	s.lastAt = time.Now()
+}
+
+// syncLocked 把缓冲写入并刷到稳定存储。
+// 只在关闭/切换文件时调用：每次请求都 fsync 会让日志读取线程阻塞十几毫秒，
+// 进而堵住 gost 的 stdout 管道。
+func (s *Store) syncLocked() {
 	if s.w != nil {
 		_ = s.w.Flush()
 	}
@@ -177,7 +206,15 @@ func (s *Store) rotateLocked(at time.Time) error {
 	if s.day == day && s.w != nil {
 		return nil
 	}
-	s.flushLocked()
+	// 已经写入更新的一天后，不再回头写旧记录。
+	//
+	// 环形缓冲跨过午夜时，下一轮 Flush 仍会带着昨天的记录。若每轮都
+	// 切回昨天的文件，就要重扫整个旧文件（countLines）并重置去重表，
+	// 造成持续的磁盘扫描与重复追加。旧记录在上一次 Flush 已落盘。
+	if s.day != "" && day < s.day {
+		return errPastDay
+	}
+	s.syncLocked()
 	if s.f != nil {
 		_ = s.f.Close()
 		s.f, s.w = nil, nil
@@ -187,11 +224,17 @@ func (s *Store) rotateLocked(at time.Time) error {
 	if err != nil {
 		return err
 	}
+	// 长期运行不会重启，过期文件必须在切天时顺手清掉。
+	s.Prune()
 	s.f, s.w, s.day = f, bufio.NewWriterSize(f, 64*1024), day
 	s.written = map[string]string{}
 	s.count = countLines(filepath.Join(s.dir, day+".jsonl"))
+	s.counts[day] = s.count
 	return nil
 }
+
+// errPastDay 表示记录属于已经翻过去的日期（Flush 时忽略，不算错误）。
+var errPastDay = errors.New("记录日期早于当前写入文件")
 
 // Load 读取某一天的记录（同 key 以最后一行为准）。
 func (s *Store) Load(day string) ([]Entry, error) {
@@ -282,8 +325,20 @@ func (s *Store) DayCount(day string) int {
 		s.mu.Unlock()
 		return n
 	}
+	if n, ok := s.counts[day]; ok {
+		s.mu.Unlock()
+		return n
+	}
 	s.mu.Unlock()
-	return countLines(filepath.Join(s.dir, day+".jsonl"))
+
+	n := countLines(filepath.Join(s.dir, day+".jsonl"))
+	s.mu.Lock()
+	if s.counts == nil {
+		s.counts = map[string]int{}
+	}
+	s.counts[day] = n
+	s.mu.Unlock()
+	return n
 }
 
 // Limit 返回单日上限。

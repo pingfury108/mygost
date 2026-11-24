@@ -20,6 +20,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-gost/plugin/bypass/proto"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 	"mygost/internal/proc"
 	"mygost/internal/profiles"
 	"mygost/internal/splitbin"
@@ -49,6 +52,7 @@ const (
 
 // Manager 托管分流插件进程。
 type Manager struct {
+	opMu   sync.Mutex
 	mu     sync.Mutex
 	dir    string
 	port   int
@@ -97,6 +101,13 @@ func (m *Manager) SetPolicy(p Policy) {
 	m.mu.Unlock()
 }
 
+// Policy 返回当前策略（下次启动生效）。
+func (m *Manager) Policy() Policy {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.policy
+}
+
 // PluginPath 返回插件二进制路径。
 func (m *Manager) PluginPath() string {
 	name := "splitd"
@@ -113,7 +124,12 @@ func (m *Manager) IPListPath() string { return filepath.Join(m.dir, "geoip-cn.tx
 func (m *Manager) DomainListPath() string { return filepath.Join(m.dir, "geosite-cn.txt") }
 
 // Addr 返回插件 gRPC 地址。
-func (m *Manager) Addr() string { return fmt.Sprintf("127.0.0.1:%d", m.port) }
+func (m *Manager) Addr() string {
+	m.mu.Lock()
+	port := m.port
+	m.mu.Unlock()
+	return fmt.Sprintf("127.0.0.1:%d", port)
+}
 
 // Installed 报告插件是否就位（数据目录或嵌入副本）。
 func (m *Manager) Installed() bool {
@@ -152,11 +168,15 @@ func (m *Manager) Running() bool {
 	return true
 }
 
-// Alive 报告插件服务是否可用：自有进程活着，或地址上已有可用实例。
+// Alive 报告插件服务是否可用。
 //
 // 判定以“服务能不能用”为准，不看进程归属：app 重启后自有 cmd 是 nil，
 // 但上次遗留的 splitd 仍在监听，此时应该直接复用而不是报未运行。
-func (m *Manager) Alive() bool { return m.Running() || portReachable(m.Addr()) }
+//
+// 必须发真实的 gRPC 请求：8100 也可能被任意本地服务占用，只看 TCP
+// 是否可连会把无关服务当成插件复用，随后所有判定失败、分流退化。
+// 自有进程活着也不够：插件可能仍在加载规则或已卡死，必须能完成一次请求。
+func (m *Manager) Alive() bool { return bypassReachable(m.Addr()) }
 
 // Status 是插件状态快照（供界面渲染，不做事）。
 type Status struct {
@@ -184,7 +204,7 @@ func (m *Manager) setErr(err error) {
 	}
 }
 
-// portReachable 报告地址上是否有人在监听。
+// portReachable 报告地址上是否有人在监听（只用于端口冲突诊断）。
 func portReachable(addr string) bool {
 	conn, err := net.DialTimeout("tcp", addr, 300*time.Millisecond)
 	if err != nil {
@@ -192,6 +212,26 @@ func portReachable(addr string) bool {
 	}
 	conn.Close()
 	return true
+}
+
+// bypassReachable 发一次 Bypass 请求确认对端确实是分流插件。
+func bypassReachable(addr string) bool {
+	// 本地回环正常是毫秒级；放宽到 600ms，避免高负载/竞态检测下
+	// 把正在工作的插件误判为不可用。
+	ctx, cancel := context.WithTimeout(context.Background(), 600*time.Millisecond)
+	defer cancel()
+	return probeBypass(ctx, addr) == nil
+}
+
+func probeBypass(ctx context.Context, addr string) error {
+	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	// 用 IP 目标探活：不会触发 PolicyResolve 的 DNS 查询。
+	_, err = proto.NewBypassClient(conn).Bypass(ctx, &proto.BypassRequest{Addr: "127.0.0.1:1"})
+	return err
 }
 
 // ensurePort 确保当前端口可用：被其他程序占用时换一个空闲端口。
@@ -255,6 +295,9 @@ func (m *Manager) ensureInstalled() error {
 
 // Start 启动插件（幂等）。两份列表都必须已存在。
 func (m *Manager) Start(ctx context.Context) error {
+	m.opMu.Lock()
+	defer m.opMu.Unlock()
+
 	if err := m.start(ctx); err != nil {
 		m.setErr(err)
 		return err
@@ -265,9 +308,22 @@ func (m *Manager) Start(ctx context.Context) error {
 
 func (m *Manager) start(ctx context.Context) error {
 	m.mu.Lock()
-	if m.cmd != nil && m.cmd.Process != nil {
-		m.mu.Unlock()
-		return nil
+	if cmd, exited := m.cmd, m.exited; cmd != nil && cmd.Process != nil {
+		alive := true
+		if exited != nil {
+			select {
+			case <-exited:
+				alive = false
+			default:
+			}
+		}
+		if alive {
+			m.mu.Unlock()
+			return nil
+		}
+		// 崩溃退出后必须清掉旧句柄，否则后续 Start 会永远误判"已在运行"。
+		m.cmd, m.cancel, m.exited = nil, nil, nil
+		m.external = false
 	}
 	policy := m.policy
 	m.mu.Unlock()
@@ -277,7 +333,7 @@ func (m *Manager) start(ctx context.Context) error {
 	// 这一步必须在前：实例已经在跑，说明它自己已持有规则与二进制，
 	// 我们无需下载规则也无需解压本地副本（CI 环境根本没有嵌入包，
 	// 以前会在这里误报“插件未嵌入”）。
-	if portReachable(m.Addr()) {
+	if bypassReachable(m.Addr()) {
 		m.mu.Lock()
 		m.external = true
 		m.mu.Unlock()
@@ -327,6 +383,7 @@ func (m *Manager) start(ctx context.Context) error {
 	m.cmd, m.cancel = cmd, cancel
 	exited := make(chan struct{})
 	m.exited = exited
+	m.external = false
 	m.mu.Unlock()
 
 	go func() {
@@ -339,6 +396,11 @@ func (m *Manager) start(ctx context.Context) error {
 	go func() {
 		_ = cmd.Wait()
 		close(exited)
+		m.mu.Lock()
+		if m.cmd == cmd {
+			m.cmd, m.cancel, m.exited = nil, nil, nil
+		}
+		m.mu.Unlock()
 	}()
 	return nil
 }
@@ -349,36 +411,57 @@ func (m *Manager) start(ctx context.Context) error {
 // 只杀本实例拉起的进程：复用的外部实例（上次遗留/其他实例）不归我们管，
 // 杀了会误伤。要连外部实例一起停的语义由 ForceStop 提供。
 func (m *Manager) Stop() {
+	m.opMu.Lock()
+	defer m.opMu.Unlock()
+	m.stop()
+}
+
+func (m *Manager) stop() {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.cancel != nil {
-		m.cancel()
-	}
-	if m.cmd != nil && m.cmd.Process != nil {
-		_ = m.cmd.Process.Kill()
-	}
+	cancel, cmd, exited := m.cancel, m.cmd, m.exited
 	m.cmd, m.cancel = nil, nil
 	m.external = false
+	m.mu.Unlock()
+
+	if cancel != nil {
+		cancel()
+	}
+	if cmd != nil && cmd.Process != nil {
+		_ = cmd.Process.Kill()
+	}
+	// 等进程真正退出再返回：ForceStop 紧接着会探测端口，
+	// 立刻探测可能命中尚未释放的旧 socket，误报「仍有外部实例」。
+	if exited != nil {
+		select {
+		case <-exited:
+		case <-time.After(time.Second):
+		}
+	}
 }
 
 // ForceStop 停掉本实例进程，并在地址上仍有人监听时返回错误提示。
 //
 // 用于“分流关闭”场景：插件不该继续占着端口，但外部实例需要显式清理。
 func (m *Manager) ForceStop() error {
-	m.Stop()
-	if portReachable(m.Addr()) {
-		return fmt.Errorf("端口 %s 上仍有外部插件实例", m.Addr())
+	m.opMu.Lock()
+	m.stop()
+	m.opMu.Unlock()
+
+	addr := m.Addr()
+	if portReachable(addr) {
+		return fmt.Errorf("端口 %s 上仍有外部插件实例", addr)
 	}
 	return nil
 }
 
-// WaitReady 轮询等待插件端口可连。
+// WaitReady 轮询等待插件 gRPC 服务可用。
 func (m *Manager) WaitReady(ctx context.Context, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		conn, err := net.DialTimeout("tcp", m.Addr(), 500*time.Millisecond)
+		attemptCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+		err := probeBypass(attemptCtx, m.Addr())
+		cancel()
 		if err == nil {
-			conn.Close()
 			return nil
 		}
 		select {

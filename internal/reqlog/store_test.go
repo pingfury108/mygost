@@ -131,11 +131,57 @@ func TestStoreRotatesByDay(t *testing.T) {
 	}
 }
 
+// 环形缓冲跨过午夜后会带着昨天的记录；已经写到今天时不能再切回昨天，
+// 否则每轮 Flush 都要重扫旧文件并重复追加。
+func TestStoreDoesNotRotateBackwards(t *testing.T) {
+	s := newStore(t)
+	now := time.Now()
+	prev := now.AddDate(0, 0, -1)
+
+	s.Append(Entry{At: now, Target: "today.com", SID: "t", Decision: Direct})
+	s.Flush()
+	s.Append(Entry{At: prev, Target: "old.com", SID: "o", Decision: Direct})
+	s.Flush()
+
+	got, _ := s.Load(prev.Format(dayLayout))
+	if len(got) != 0 {
+		t.Errorf("切到新一天后不应再补写旧记录: %+v", got)
+	}
+	if n := countLines(filepath.Join(s.dir, now.Format(dayLayout)+".jsonl")); n != 1 {
+		t.Errorf("今天文件行数 = %d, want 1（旧记录被重复追加？）", n)
+	}
+}
+
+// Close 之后后台定时器再 Flush/Append 不能重新打开文件。
+func TestStoreIgnoresWritesAfterClose(t *testing.T) {
+	dir := t.TempDir()
+	s, err := OpenStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	s.Append(Entry{At: now, Target: "before.com", SID: "1", Decision: Direct})
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s.Flush()
+	s.Append(Entry{At: now, Target: "after.com", SID: "2", Decision: Direct})
+	got, err := s.Load(now.Format(dayLayout))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Target != "before.com" {
+		t.Fatalf("关闭后仍写入了记录: %+v", got)
+	}
+}
+
 // Days 返回可用日期，新→旧，最多 Retention 个。
 func TestStoreDaysOrder(t *testing.T) {
 	s := newStore(t)
 	now := time.Now()
-	for i := 0; i < 3; i++ {
+	// 与真实写入一致：按时间先后追加（旧→新）。
+	for i := 2; i >= 0; i-- {
 		s.Append(Entry{At: now.AddDate(0, 0, -i), Target: "x.com",
 			SID: string(rune('a' + i)), Decision: Direct})
 	}

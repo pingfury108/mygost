@@ -3,6 +3,7 @@ package main
 import (
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -48,6 +49,11 @@ func newTestApp(t *testing.T) *app {
 	a.refreshViewModel()
 	// 请求记录持久化（临时目录，不碰真实数据）
 	a.initRequestStore(t.TempDir())
+	t.Cleanup(func() {
+		if s := a.reqs.Store(); s != nil {
+			_ = s.Close()
+		}
+	})
 	return a
 }
 
@@ -127,6 +133,32 @@ func TestEditorView(t *testing.T) {
 	}
 	if !tt.HasText("本机监听") {
 		t.Errorf("proxy form should show the listener section, texts %q", tt.Texts())
+	}
+}
+
+// 自定义 YAML 必须能保存并原样生成配置文件。
+func TestSaveCustomYAML(t *testing.T) {
+	a := newTestApp(t)
+	a.startNew()
+	a.formKind = 2
+	a.syncFormKind()
+	src := "services:\n  - name: raw\n    addr: \":19080\"\n    handler:\n      type: http\n    listener:\n      type: tcp\n"
+	a.form.Name = "raw"
+	a.customBuf.Buffer.Set(src)
+	a.saveEdit()
+	if a.formErr != "" {
+		t.Fatalf("save failed: %s", a.formErr)
+	}
+	items := a.ps.Items()
+	if len(items) != 1 || items[0].Kind != profiles.KindCustom {
+		t.Fatalf("profile not saved: %+v", items)
+	}
+	data, err := os.ReadFile(a.ps.YamlPath(items[0].ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != src {
+		t.Fatalf("custom YAML changed:\n%s", data)
 	}
 }
 
@@ -284,6 +316,44 @@ func TestTrayMenuShape(t *testing.T) {
 	}
 }
 
+// 托盘图标只有两个状态，必须缓存；不能每秒重新超采样并 PNG 编码。
+func TestTrayPNGCached(t *testing.T) {
+	a := trayPNG(true)
+	b := trayPNG(true)
+	if len(a) == 0 || len(b) == 0 {
+		t.Fatal("图标为空")
+	}
+	if &a[0] != &b[0] {
+		t.Error("运行态图标未复用缓存")
+	}
+	idle := trayPNG(false)
+	if &a[0] == &idle[0] {
+		t.Error("运行/停止图标不应共用同一缓存")
+	}
+}
+
+// 运行中改选其它配置时，不能把"当前选中"误报成"正在运行"。
+func TestRunningProfileIndependentOfSelection(t *testing.T) {
+	a := newTestApp(t)
+	for _, name := range []string{"a", "b"} {
+		if _, err := a.ps.Save(&profiles.Profile{
+			Name: name, Kind: profiles.KindProxy, Listen: ":8027", Proto: "http",
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	items := a.ps.Items()
+	first, second := items[0].ID, items[1].ID
+	if err := a.pm.Attach(os.Getpid(), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	a.setRunningProfile(first)
+	a.st.Update(func(s *settings.Settings) { s.Current = second })
+	if got := a.runningProfileID(); got != first {
+		t.Fatalf("runningProfileID = %q, want %q", got, first)
+	}
+}
+
 // 菜单/托盘文案跟随系统语言：中文环境用中文，其余用英文。
 func TestMenuLanguage(t *testing.T) {
 	defer func() { langZh = true }()
@@ -323,7 +393,8 @@ func TestProbeAddr(t *testing.T) {
 	cases := map[string]string{
 		":8026":          "127.0.0.1:8026",
 		"127.0.0.1:8080": "127.0.0.1:8080",
-		"0.0.0.0:1080":   "0.0.0.0:1080",
+		"0.0.0.0:1080":   "127.0.0.1:1080",
+		"[::]:1081":      "127.0.0.1:1081",
 		"":               "",
 		"garbage":        "",
 	}
@@ -624,5 +695,53 @@ func TestIsNetworkPath(t *testing.T) {
 		if got := isNetworkPath(p); got != want {
 			t.Errorf("isNetworkPath(%q) = %v, want %v", p, got, want)
 		}
+	}
+}
+
+// 日志过滤用的零分配匹配：只折叠 ASCII，sub 需小写。
+func TestContainsFold(t *testing.T) {
+	cases := []struct {
+		s, sub string
+		want   bool
+	}{
+		{"Hello World", "hello", true},
+		{"hello world", "world", true},
+		{"hello world", "WORLD", false},
+		{"abc", "", true},
+		{"", "a", false},
+		{"中文Host名", "host", true},
+		{"中文Host名", "中文", true},
+		{"abc", "abd", false},
+	}
+	for _, c := range cases {
+		if got := containsFold(c.s, c.sub); got != c.want {
+			t.Errorf("containsFold(%q, %q) = %v, want %v", c.s, c.sub, got, c.want)
+		}
+	}
+}
+
+// 重启后持久化的分流策略要传给插件；请求记录开关决定是否解析 debug 日志。
+func TestNewAppRestoresPersistedSettings(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("MYGOST_DATA_DIR", dir)
+	if err := os.WriteFile(filepath.Join(dir, "settings.json"),
+		[]byte(`{"splitPolicy":"resolve","requestLog":true}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	oldDir := dataDir
+	defer func() { dataDir = oldDir }()
+
+	a := newApp()
+	if s := a.reqs.Store(); s != nil {
+		defer s.Close()
+	}
+	if dataDir != dir {
+		t.Errorf("包级 dataDir = %q, want %q（:= 会遮蔽全局变量）", dataDir, dir)
+	}
+	if got := a.geoM.Policy(); got != geo.PolicyResolve {
+		t.Errorf("policy = %v, want resolve（重启后策略丢失）", got)
+	}
+	if !a.reqs.Enabled() {
+		t.Error("requestLog=true 时应在启动后就开启解析")
 	}
 }

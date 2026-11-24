@@ -6,6 +6,7 @@ import (
 	"image/color"
 	"image/png"
 	"math"
+	"sync"
 	"time"
 
 	"github.com/egoist/mygo"
@@ -32,9 +33,14 @@ func (a *app) setupTray() {
 // tickTray 运行中每秒刷新一次托盘（菜单栏里的运行时长）。
 func (a *app) tickTray() {
 	go func() {
-		for range time.Tick(time.Second) {
+		t := time.NewTicker(time.Second)
+		defer t.Stop()
+		for range t.C {
+			if a.win == nil || a.win.IsDestroyed() {
+				return
+			}
 			if st, _, _ := a.pm.State(); st == proc.Running {
-				a.refreshTray()
+				a.applyUI(a.refreshTray)
 			}
 		}
 	}()
@@ -49,7 +55,10 @@ func (a *app) refreshTray() {
 	running := state == proc.Running
 
 	// 图标：运行中实心拱洞，停止时空心
-	a.tray.SetIcon(trayPNG(running), true)
+	if !a.trayIconSet || a.trayIconRunning != running {
+		a.tray.SetIcon(trayPNG(running), true)
+		a.trayIconRunning, a.trayIconSet = running, true
+	}
 
 	name, port := a.trayTarget()
 
@@ -62,7 +71,11 @@ func (a *app) refreshTray() {
 
 // trayTarget 返回当前选中的配置名与端口。
 func (a *app) trayTarget() (name, port string) {
-	if p := a.currentProfile(); p != nil {
+	id := a.runningProfileID()
+	if id == "" {
+		id = a.st.Get().Current
+	}
+	if p := a.ps.Get(id); p != nil {
 		return p.Name, p.Listen
 	}
 	return "", ""
@@ -171,42 +184,63 @@ func (a *app) trayProfileItems() []*mygo.MenuItem {
 // trayConnect 从托盘切换/连接某个配置：
 // 未运行则直接连接；运行其它配置则先停后启，失败回滚原配置。
 func (a *app) trayConnect(id string) {
-	target := a.ps.Get(id)
-	if target == nil {
+	// 与窗口共用同一把启停锁和完整启动流程，避免托盘绕过端口预检、
+	// 插件就绪、配置重写与 PID 记录。
+	if !a.beginOp() {
 		return
 	}
-	bin, _, err := a.loc.Find(a.st.Get().GostPath)
-	if err != nil {
-		a.toast(tr("未找到 gost，请先下载", "gost not found, download it first"), "error")
+	defer a.endOp()
+
+	if a.ps.Get(id) == nil {
 		return
 	}
 
 	runningID := a.runningProfileID()
-	oldID := runningID
 	if runningID != "" {
 		if runningID == id {
 			return // 已在运行的就是它
 		}
-		a.pm.StopAndWait(5 * time.Second)
+		if !a.stopGostLocked() {
+			return
+		}
 	}
 
+	oldID := a.st.Get().Current
+	if runningID != "" {
+		oldID = runningID
+	}
 	a.update(func(s *settings.Settings) { s.Current = id })
-	startErr := a.pm.Start(bin, a.ps.YamlPath(id))
-	if startErr == nil {
-		a.toast(tr("已连接 ", "Connected to ")+target.Name, "success")
+	if a.startCurrent() {
 		return
 	}
 
-	// 回滚到原配置
+	// 回滚到原先真正在运行的配置；未运行过的配置不自动拉起。
 	a.update(func(s *settings.Settings) { s.Current = oldID })
-	if oldID != "" {
-		a.pm.Start(bin, a.ps.YamlPath(oldID))
+	if runningID != "" && oldID != "" {
+		a.startCurrentNotify(false)
 	}
-	a.toast(tr("切换到 ", "Failed to switch to ")+target.Name+tr(" 失败：", ": ")+startErr.Error(), "error")
 }
 
-// trayPNG 绘制 32×32 单色托盘图标：隧道拱洞，运行中实心并带光点。
+var trayPNGCache struct {
+	once          sync.Once
+	idle, running []byte
+}
+
+// trayPNG 返回托盘图标；两种状态只生成一次，避免每秒刷新都做
+// 超采样与 PNG 编码。
 func trayPNG(running bool) []byte {
+	trayPNGCache.once.Do(func() {
+		trayPNGCache.idle = buildTrayPNG(false)
+		trayPNGCache.running = buildTrayPNG(true)
+	})
+	if running {
+		return trayPNGCache.running
+	}
+	return trayPNGCache.idle
+}
+
+// buildTrayPNG 绘制 32×32 单色托盘图标：隧道拱洞，运行中实心并带光点。
+func buildTrayPNG(running bool) []byte {
 	const (
 		out = 32
 		ss  = 4

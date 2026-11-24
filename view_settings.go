@@ -72,6 +72,7 @@ func (a *app) viewSettings(c *ui.Context) {
 					settingRow(c, "记录请求明细", "记录每个请求是直连还是走代理（debug 日志，量较大）", func() {
 						if ui.Switch(c, &a.sReqLog).Changed() {
 							a.saveSettings()
+							a.reqs.SetEnabled(a.sReqLog)
 							a.toast(tr("重新连接后生效", "Takes effect on next connect"), "success")
 						}
 					})
@@ -237,7 +238,9 @@ func (a *app) saveSettingsDebounced() {
 	if a.saveTimer != nil {
 		a.saveTimer.Stop()
 	}
-	a.saveTimer = time.AfterFunc(600*time.Millisecond, a.saveSettings)
+	a.saveTimer = time.AfterFunc(600*time.Millisecond, func() {
+		a.applyUI(a.saveSettings)
+	})
 }
 
 // saveAndCheck 落盘并重新检测 gost 二进制（路径/镜像变化时用）。
@@ -262,12 +265,12 @@ func (a *app) listDesc(count int, at time.Time) string {
 
 // ipListDesc 是 IP 列表行的描述文字（行数来自后台探测的 vm，不读文件）。
 func (a *app) ipListDesc() string {
-	return a.listDesc(a.vm.ipCount, a.geoM.UpdateAt(a.geoM.IPListPath()))
+	return a.listDesc(a.vm.ipCount, a.vm.ipAt)
 }
 
 // domainListDesc 是域名列表行的描述文字（行数来自 vm）。
 func (a *app) domainListDesc() string {
-	return a.listDesc(a.vm.domainCount, a.geoM.UpdateAt(a.geoM.DomainListPath()))
+	return a.listDesc(a.vm.domainCount, a.vm.domainAt)
 }
 
 // onSplitToggled 在开关变化时落盘；开启即预下载规则，保证下次连接可用。
@@ -328,6 +331,8 @@ func (a *app) updateSplitLists() {
 }
 
 // leftovers 返回不属于当前会话、但由本应用启动的 gost 进程。
+//
+// 这是实时扫描（用户点“全部结束”时用），不要放进渲染或周期探测路径。
 func (a *app) leftovers() []int {
 	all := proc.FindByConfig(filepath.Join(dataDir, "profiles"), a.gostExeDirs()...)
 	cur := a.pm.Pid()
@@ -338,6 +343,31 @@ func (a *app) leftovers() []int {
 		}
 	}
 	return out
+}
+
+// leftoverScanInterval 是残留进程扫描的最小间隔。
+//
+// pgrep 要遍历整张进程表（macOS 上实测约 40ms）。之前每 2 秒探测一次
+// 等于常驻占用约 2% 单核；残留进程变化很慢，15 秒足够。
+const leftoverScanInterval = 15 * time.Second
+
+// viewLeftovers 返回供界面展示的残留进程（带缓存，渲染/探测路径用）。
+func (a *app) viewLeftovers() []int {
+	a.leftoverMu.Lock()
+	defer a.leftoverMu.Unlock()
+	if a.leftoverOK && time.Since(a.leftoverAt) < leftoverScanInterval {
+		return a.leftoverPids
+	}
+	pids := a.leftovers()
+	a.leftoverAt, a.leftoverPids, a.leftoverOK = time.Now(), pids, true
+	return pids
+}
+
+// invalidateLeftovers 让下一次探测重新扫描（结束进程后调用）。
+func (a *app) invalidateLeftovers() {
+	a.leftoverMu.Lock()
+	a.leftoverOK = false
+	a.leftoverMu.Unlock()
 }
 
 // leftoverDesc 描述残留进程数量（数量来自后台探测的 vm）。
@@ -357,6 +387,7 @@ func (a *app) killLeftovers() {
 			n++
 		}
 	}
+	a.invalidateLeftovers()
 	a.win.Update(func() {
 		if n == 0 {
 			a.pendingToasts = append(a.pendingToasts,
@@ -490,8 +521,10 @@ func (a *app) pickDataDir() {
 }
 
 // applyDataDir 落实目录变更：可选迁移，然后写指针。
-func (a *app) applyDataDir(migrate bool) {
-	next := a.pendingDataDir
+//
+// 在后台 goroutine 执行：停 gost 最多等 3 秒，迁移还要复制几十 MB，
+// 放在主线程会让界面卡住。
+func (a *app) applyDataDir(next string, migrate bool) {
 	if next == "" {
 		return
 	}
@@ -550,10 +583,12 @@ func (a *app) dataDirPendingBlock(c *ui.Context) {
 					a.pendingDataDir = ""
 				})
 				ui.Button(c, tr("仅更改", "Change only")).Grow(1).OnClick(func() {
-					a.applyDataDir(false)
+					next := a.pendingDataDir
+					go a.applyDataDir(next, false)
 				})
 				ui.PrimaryButton(c, tr("迁移并更改", "Migrate")).Grow(2).OnClick(func() {
-					a.applyDataDir(true)
+					next := a.pendingDataDir
+					go a.applyDataDir(next, true)
 				})
 			})
 		})

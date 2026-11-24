@@ -146,6 +146,37 @@ func TestClear(t *testing.T) {
 	}
 }
 
+// sid 索引必须随环形缓冲复用而回收，否则长跑会无限增长。
+func TestSIDsBoundedByRing(t *testing.T) {
+	l := New(32)
+	for i := 0; i < 5000; i++ {
+		l.Feed(`{"msg":"route(retry=0) t` + itoa(i) + `.com:443","sid":"s` + itoa(i) + `"}`)
+	}
+	if n := len(l.sids); n > 32 {
+		t.Fatalf("sids = %d，应不超过环形缓冲容量 32", n)
+	}
+}
+
+// Flush 只应处理上次之后新建/更新过的记录。
+func TestFlushOnlyReturnsChanged(t *testing.T) {
+	l := New(10)
+	l.Feed(`{"msg":"route(retry=0) a.com:443","sid":"a"}`)
+	l.Feed(`{"msg":"route(retry=0) b.com:443","sid":"b"}`)
+	if got := l.changed(); len(got) != 2 {
+		t.Fatalf("首次 Flush 应包含 2 条，得到 %d", len(got))
+	}
+	if got := l.changed(); len(got) != 0 {
+		t.Fatalf("没有变化时应为空，得到 %+v", got)
+	}
+
+	// 后续日志补节点：同一条记录要再次进入落盘队列。
+	l.Feed(`{"msg":"route(retry=0) node-0@1.2.3.4:8081 > a.com:443","sid":"a"}`)
+	got := l.changed()
+	if len(got) != 1 || got[0].SID != "a" || got[0].Node == "" {
+		t.Fatalf("更新后的记录未返回: %+v", got)
+	}
+}
+
 func itoa(i int) string {
 	if i == 0 {
 		return "0"

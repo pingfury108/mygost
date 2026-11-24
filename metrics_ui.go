@@ -17,49 +17,55 @@ import (
 
 // startMetrics 在连接成功后开始采样 gost 的 metrics 端点。
 func (a *app) startMetrics(port int) {
-	a.metricsPort = port
+	gen := a.metricsGen.Add(1)
+	a.metricsPort.Store(int32(port))
 	if port <= 0 {
 		a.mc.SetAddr("")
 		return
 	}
 	a.mc.SetAddr("127.0.0.1:" + itoa(port))
 	a.msp.Reset()
-	a.metricsOK = false
-	a.rates = metrics.Rates{}
-	a.hasSessBase = false
 	if a.stats != nil {
 		a.stats.AddSession(todayKey())
 	}
-	go a.metricsLoop(port)
+	a.applyUI(func() {
+		a.metricsOK = false
+		a.rates = metrics.Rates{}
+		a.hasSessBase = false
+	})
+	go a.metricsLoop(port, gen)
 }
 
 // stopMetrics 停止采样并清空显示。
 func (a *app) stopMetrics() {
-	a.metricsPort = 0
+	a.metricsGen.Add(1)
+	a.metricsPort.Store(0)
 	a.mc.SetAddr("")
-	a.metricsOK = false
-	a.rates = metrics.Rates{}
-	a.hasSessBase = false
-	if a.stats != nil {
-		if err := a.stats.Save(); err != nil {
-			log.Printf("保存流量统计失败: %v", err)
-		}
-	}
+	a.applyUI(func() {
+		a.metricsOK = false
+		a.rates = metrics.Rates{}
+		a.hasSessBase = false
+	})
+	a.saveStats()
 }
 
 // metricsLoop 每秒抓一次数据；gost 停止后自动退出。
-func (a *app) metricsLoop(port int) {
+func (a *app) metricsLoop(port int, gen int64) {
 	t := time.NewTicker(time.Second)
 	defer t.Stop()
 	for range t.C {
-		if a.metricsPort != port {
+		if a.metricsGen.Load() != gen || int(a.metricsPort.Load()) != port {
 			return // 端口变了或已停止
 		}
 		if st, _, _ := a.pm.State(); st != proc.Running {
 			return
 		}
 		snap, err := a.mc.Scrape()
-		a.win.Update(func() {
+		a.applyUI(func() {
+			// 抓取期间可能已经停止/重启；旧采样不能污染新会话。
+			if a.metricsGen.Load() != gen || int(a.metricsPort.Load()) != port {
+				return
+			}
 			if err != nil {
 				a.metricsOK = false
 				return
@@ -96,10 +102,26 @@ func (a *app) accumulate(snap metrics.Snapshot) {
 	// 每 60 秒落盘一次，避免高频 IO
 	if time.Since(a.statsSaved) >= time.Minute {
 		a.statsSaved = time.Now()
+		a.saveStats()
+	}
+}
+
+// saveStats 异步落盘；无窗口（测试/退出兜底）时同步执行，
+// 避免临时目录清理后后台写盘才启动。
+func (a *app) saveStats() {
+	if a.stats == nil {
+		return
+	}
+	save := func() {
 		if err := a.stats.Save(); err != nil {
 			log.Printf("保存流量统计失败: %v", err)
 		}
 	}
+	if a.win == nil {
+		save()
+		return
+	}
+	go save()
 }
 
 // todayKey 返回本地日期键 YYYY-MM-DD。

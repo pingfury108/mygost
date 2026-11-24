@@ -21,10 +21,10 @@ func (a *app) viewRequests(c *ui.Context) {
 	t := c.Theme()
 	entries := a.requestEntries()
 	if q := strings.TrimSpace(a.logFilter); q != "" {
+		ql := strings.ToLower(q)
 		kept := entries[:0:0]
 		for _, e := range entries {
-			if strings.Contains(strings.ToLower(e.Target), strings.ToLower(q)) ||
-				strings.Contains(strings.ToLower(e.Err), strings.ToLower(q)) {
+			if containsFold(e.Target, ql) || containsFold(e.Err, ql) {
 				kept = append(kept, e)
 			}
 		}
@@ -89,7 +89,7 @@ func (a *app) viewRequests(c *ui.Context) {
 		ui.Row(c).FillWidth().AlignItems(ui.Center).Gap(sp2).Children(func() {
 			ui.Text(c, fmt.Sprintf(tr("%d 条", "%d entries"), len(entries))).
 				FontSize(fsCaption).TextColor(t.TextMuted).Grow(1)
-			if !a.reqs.Enabled() {
+			if !a.reqs.Enabled() && a.reqDay == "" {
 				ui.Text(c, tr("未记录（需开启调试日志）", "Not recording (needs debug log)")).
 					FontSize(fsCaption).TextColor(t.Warning)
 			}
@@ -102,6 +102,12 @@ func (a *app) viewRequests(c *ui.Context) {
 				ui.Column(c).FillWidth().Gap(1).Children(func() {
 					if len(entries) == 0 {
 						ui.Column(c).Fill().Center().Gap(sp2).Padding(sp6).Children(func() {
+							if a.reqDay != "" && a.reqDayLoading == a.reqDay {
+								ui.Spinner(c)
+								ui.Text(c, tr("正在加载历史记录…", "Loading history…")).
+									FontSize(fsBody).TextColor(t.TextMuted)
+								return
+							}
 							ui.Text(c, tr("暂无请求记录", "No requests yet")).
 								FontSize(fsBody).TextColor(t.TextMuted)
 							ui.Text(c, tr("连接后发起的请求会显示在这里", "Requests appear here once connected")).
@@ -211,17 +217,59 @@ var _ = proc.Running
 // 这里只读：解析在 internal/reqlog，落盘在 request_feed.go。
 func (a *app) requestEntries() []reqlog.Entry {
 	if a.reqDay == "" {
-		return a.reqs.Entries(0)
+		// 缓冲用于持久化可能比可见列表大得多，帧内只复制界面上限附近。
+		return a.reqs.Entries(requestViewMaxEntries)
 	}
+	if a.reqDayLoaded == a.reqDay {
+		return a.reqDayEntries
+	}
+	// 历史文件可能几 MB，解析放后台；加载完成前返回空列表。
+	if a.reqDayLoading != a.reqDay {
+		a.reqDayLoading = a.reqDay
+		if a.win == nil {
+			a.loadRequestDay(a.reqDay)
+			return a.reqDayEntries
+		}
+		go a.loadRequestDay(a.reqDay)
+	}
+	// 重载期间继续显示上一版，避免今天有新增记录时列表闪空。
+	return a.reqDayEntries
+}
+
+// loadRequestDay 后台加载某天的请求记录，完成后回到主线程更新缓存。
+func (a *app) loadRequestDay(day string) {
 	st := a.reqs.Store()
 	if st == nil {
-		return nil
+		a.applyUI(func() {
+			if a.reqDayLoading == day {
+				a.reqDayLoading = ""
+			}
+		})
+		return
 	}
-	es, err := st.Load(a.reqDay)
-	if err != nil {
-		return nil
+	es, err := st.Load(day)
+	apply := func() {
+		// 旧请求晚到时只能清掉自己的 loading 标记，不能覆盖后来那次加载。
+		if a.reqDayLoading == day {
+			a.reqDayLoading = ""
+		}
+		if a.reqDay != day {
+			return
+		}
+		if err == nil {
+			a.reqDayEntries = es
+			a.reqDayCount = st.DayCount(day)
+		}
+		a.reqDayLoaded = day // 失败也标记，避免每帧重试坏文件
 	}
-	return es
+	if a.win != nil {
+		a.win.Update(func() {
+			apply()
+			a.win.Invalidate()
+		})
+	} else {
+		apply()
+	}
 }
 
 // requestDayRow 是请求视图的日期切换行。
@@ -231,14 +279,7 @@ func (a *app) requestEntries() []reqlog.Entry {
 func (a *app) requestDayRow(c *ui.Context) {
 	t := c.Theme()
 	live := tr("实时", "Live")
-	opts := []string{live}
-	var st *reqlog.Store
-	if a.reqs != nil {
-		st = a.reqs.Store()
-	}
-	if st != nil {
-		opts = append(opts, st.Days()...)
-	}
+	opts := append([]string{live}, a.vm.reqDays...)
 
 	sel := live
 	if a.reqDay != "" {
@@ -250,15 +291,16 @@ func (a *app) requestDayRow(c *ui.Context) {
 		} else {
 			a.reqDay = sel
 		}
+		a.reqDayEntries = nil
+		a.reqDayLoaded = ""
+		a.reqDayLoading = ""
+		a.reqDayCount = 0
 	}
 
 	// 当天达到上限时提示（debug 日志可能很密）
-	if st != nil && a.reqDay == "" {
-		today := time.Now().Format("2006-01-02")
-		if n := st.DayCount(today); n >= st.Limit() {
-			ui.Textf(c, tr("今日记录已达上限 %d 条，后续请求不再保存",
-				"Daily cap %d reached, further requests are not stored"), st.Limit()).
-				FontSize(fsCaption).TextColor(t.Warning)
-		}
+	if a.reqDay == "" && a.vm.reqLimit > 0 && a.vm.reqToday >= a.vm.reqLimit {
+		ui.Textf(c, tr("今日记录已达上限 %d 条，后续请求不再保存",
+			"Daily cap %d reached, further requests are not stored"), a.vm.reqLimit).
+			FontSize(fsCaption).TextColor(t.Warning)
 	}
 }
