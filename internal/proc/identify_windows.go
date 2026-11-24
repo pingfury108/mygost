@@ -175,8 +175,7 @@ func processImagePath(pid int) string {
 
 // isGostExe 报告 exe 名是否是我们关心的 gost（不区分大小写）。
 func isGostExe(exe string) bool {
-	exe = strings.ToLower(strings.TrimSuffix(exe, ".exe"))
-	return exe == "gost"
+	return strings.TrimSuffix(strings.ToLower(exe), ".exe") == "gost"
 }
 
 // PortOwner 返回监听端口的进程 pid。
@@ -187,10 +186,20 @@ func PortOwner(port int) (pid int, name string) {
 	if port <= 0 {
 		return 0, ""
 	}
+	// -p tcp 只匹配 IPv4；IPv6-only 监听需要再查 tcpv6。
+	for _, proto := range []string{"tcp", "tcpv6"} {
+		if pid := portOwner(port, proto); pid > 0 {
+			return pid, ""
+		}
+	}
+	return 0, ""
+}
+
+func portOwner(port int, proto string) int {
 	// 隐藏窗口：避免端口冲突诊断时闪一个黑框
-	out, err := HideWindow(exec.Command("netstat", "-ano", "-p", "tcp")).Output()
+	out, err := HideWindow(exec.Command("netstat", "-ano", "-p", proto)).Output()
 	if err != nil {
-		return 0, ""
+		return 0
 	}
 	suffix := fmt.Sprintf(":%d", port)
 	for _, line := range strings.Split(string(out), "\n") {
@@ -199,10 +208,10 @@ func PortOwner(port int) (pid int, name string) {
 			continue
 		}
 		if p, e := strconv.Atoi(f[4]); e == nil && p > 0 {
-			return p, ""
+			return p
 		}
 	}
-	return 0, ""
+	return 0
 }
 
 // ProcessAlive 报告 pid 是否存活。
@@ -233,14 +242,22 @@ func ProcessAlive(pid int) bool {
 //
 // taskkill /T 的纯 Go 等价：枚举快照找全部后代，逐个 TerminateProcess。
 // 强杀前没有优雅信号可用（gost 不处理 CTRL_BREAK），行为与原实现一致。
-func Terminate(pid int) error {
+func Terminate(pid int, expectedBinary ...string) error {
 	if pid <= 0 {
 		return fmt.Errorf("无效 pid")
 	}
 	// PID 可能被系统复用：确认目标确实是 gost 再动手。
 	// 允许 gost.exe / gost-v3.3.1.exe 这类同前缀命名（用户可能改过文件名）。
-	if base := strings.ToLower(strings.TrimSuffix(filepath.Base(processImagePath(pid)), ".exe")); base != "" &&
-		!strings.HasPrefix(base, "gost") {
+	// 路径取不到时必须拒绝：PID 复用/权限受限时无法确认身份。
+	image := processImagePath(pid)
+	if image == "" {
+		return fmt.Errorf("无法确认 pid %d 的映像路径，已跳过", pid)
+	}
+	if len(expectedBinary) > 0 && strings.TrimSpace(expectedBinary[0]) != "" {
+		if !sameExecutable(image, expectedBinary[0]) {
+			return fmt.Errorf("pid %d 映像不匹配（%s），已跳过", pid, image)
+		}
+	} else if base := strings.TrimSuffix(strings.ToLower(filepath.Base(image)), ".exe"); !strings.HasPrefix(base, "gost") {
 		return fmt.Errorf("pid %d 不是 gost（%s），已跳过", pid, base)
 	}
 	h, err := windows.OpenProcess(processTerminate|processQueryLimitedInformation, false, uint32(pid))
@@ -346,7 +363,7 @@ func generateConsoleCtrlEvent(pid int) error {
 
 // stopGostGraceful Windows 上的停止：先 CTRL_BREAK（优雅），
 // 短暂等待后仍存活再强杀。返回是否已退出。
-func stopGostGraceful(pid int, wait time.Duration) bool {
+func stopGostGraceful(pid int, wait time.Duration, expected ...string) bool {
 	if pid <= 0 {
 		return false
 	}
@@ -360,7 +377,7 @@ func stopGostGraceful(pid int, wait time.Duration) bool {
 		}
 	}
 	// 优雅关闭失败/超时 → 强杀（含进程树）
-	if err := Terminate(pid); err != nil {
+	if err := Terminate(pid, expected...); err != nil {
 		return !ProcessAlive(pid)
 	}
 	deadline := time.Now().Add(2 * time.Second)
@@ -381,10 +398,23 @@ func stopGostGraceful(pid int, wait time.Duration) bool {
 func matchesRecord(rec Record) bool {
 	exe := processImagePath(rec.PID)
 	if exe == "" {
-		return true // 拿不到信息时不否决，交给存活判断
+		return false // 无法确认身份：拒绝接管，避免 PID 复用时误杀
 	}
 	if rec.Binary != "" {
 		return strings.EqualFold(filepath.Clean(exe), filepath.Clean(rec.Binary))
 	}
 	return isGostExe(filepath.Base(exe))
+}
+
+// sameExecutable 比较两个可执行文件路径（Windows 不区分大小写）。
+func sameExecutable(a, b string) bool {
+	aa, err := filepath.Abs(a)
+	if err != nil {
+		aa = a
+	}
+	bb, err := filepath.Abs(b)
+	if err != nil {
+		bb = b
+	}
+	return strings.EqualFold(filepath.Clean(aa), filepath.Clean(bb))
 }

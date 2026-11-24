@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"mygost/internal/proc"
@@ -29,6 +30,9 @@ type splitSupervisor struct {
 	backoff time.Duration // 失败退避时长
 	lastTry time.Time     // 上次尝试时间
 	lastErr string
+
+	ensureMu sync.Mutex // 规则下载/插件启动串行化
+	starting atomic.Int32
 }
 
 // 退避区间：插件起不来时不要每轮都重试（启动含 10s 就绪等待）。
@@ -46,15 +50,30 @@ func (s *splitSupervisor) Want() bool {
 	if !s.app.st.Get().Split {
 		return false
 	}
+	// 连接动作已选择“先起插件、再起 gost”。这段时间里 gost 还没
+	// Running，但插件不能被 Watch 判定为多余而停掉。
+	if s.starting.Load() > 0 {
+		return true
+	}
 	st, _, _ := s.app.pm.State()
 	return st == proc.Running
 }
+
+// BeginStart/EndStart 标记“正在为新连接准备分流插件”。
+func (s *splitSupervisor) BeginStart() { s.starting.Add(1) }
+func (s *splitSupervisor) EndStart()   { s.starting.Add(-1) }
 
 // Ensure 确保插件在运行且规则就绪，返回实际监听地址。
 //
 // 供“启动 gost 之前”调用：配置里的 split-geo 必须指向真实地址，
 // 而地址可能因 8100 被占用而变。
 func (s *splitSupervisor) Ensure(ctx context.Context) (string, error) {
+	s.ensureMu.Lock()
+	defer s.ensureMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return s.app.geoM.Addr(), err
+	}
+
 	m := s.app.geoM
 	st := s.app.st.Get()
 

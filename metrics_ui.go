@@ -189,11 +189,11 @@ func shortLatency(d time.Duration) string {
 // testProfile 测试指定配置（只走它的端口）。
 func (a *app) testProfile(id string) {
 	p := a.ps.Get(id)
-	if p == nil || a.testing {
+	if p == nil || !a.testing.CompareAndSwap(false, true) {
 		return
 	}
-	a.win.Update(func() {
-		a.testing = true
+	gen := a.testSeq.Add(1)
+	a.applyUI(func() {
 		if a.testResByID != nil {
 			delete(a.testResByID, id)
 		}
@@ -201,17 +201,20 @@ func (a *app) testProfile(id string) {
 
 	go func() {
 		results := runProbe(p)
-		a.win.Update(func() {
-			a.testing = false
+		a.applyUI(func() {
+			a.testing.Store(false)
 			if a.testResByID == nil {
 				a.testResByID = map[string][]probe.Result{}
 			}
 			a.testResByID[id] = results
 			// 结果保留 10 秒后自动恢复摘要
-			go func() {
-				time.Sleep(10 * time.Second)
-				a.win.Update(func() { delete(a.testResByID, id) })
-			}()
+			time.AfterFunc(10*time.Second, func() {
+				a.applyUI(func() {
+					if a.testSeq.Load() == gen {
+						delete(a.testResByID, id)
+					}
+				})
+			})
 		})
 	}()
 }

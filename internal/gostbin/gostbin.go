@@ -157,6 +157,9 @@ func (l *Locator) Download(ctx context.Context, mirror string, onProgress Progre
 	}
 	if err := os.Rename(tmp, final); err != nil {
 		os.Remove(tmp)
+		if runtime.GOOS == "windows" {
+			return "", fmt.Errorf("安装失败（gost 可能正在运行或被安全软件锁定，请先断开后重试）: %w", err)
+		}
 		return "", err
 	}
 	return final, nil

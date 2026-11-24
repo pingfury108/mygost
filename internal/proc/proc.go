@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -92,6 +93,8 @@ type Manager struct {
 	exited chan struct{} // 每次 Start 新建，进程退出时关闭
 	extPID int           // >0 表示接管的外部进程（非本会话 exec 启动）
 	extAt  time.Time     // 上次校验接管进程存活的时间
+	bin    string        // 本会话启动的 gost 路径（Windows 身份校验用）
+	extBin string        // 接管进程的可执行文件路径（可能为空）
 
 	// onLine 可选：每读到一行日志时调用（用于解析请求决策），在 pump 的 goroutine 上执行
 	onLine func(line string)
@@ -168,11 +171,16 @@ func (m *Manager) Start(bin, config string) error {
 	m.cmd = cmd
 	m.cancel = cancel
 	m.extPID = 0
+	m.extBin = ""
 	m.exited = make(chan struct{})
 	m.state = Running
 	m.manual = false
 	m.errStr = ""
 	m.start = time.Now()
+	m.bin = cmd.Path
+	if abs, absErr := filepath.Abs(m.bin); absErr == nil {
+		m.bin = abs
+	}
 	pw.Close() // 写端交给子进程，读端在 goroutine
 	m.mu.Unlock()
 
@@ -239,9 +247,10 @@ func (m *Manager) stopAsync() error {
 	// 接管进程：没有 cmd，按 pid 结束
 	if m.extPID > 0 {
 		pid := m.extPID
+		expected := m.extBin
 		m.mu.Unlock()
 		m.pushLine(fmt.Sprintf("→ 结束接管进程 pid=%d", pid))
-		if err := Terminate(pid); err != nil {
+		if err := Terminate(pid, expected); err != nil {
 			return err
 		}
 		deadline := time.Now().Add(3 * time.Second)
@@ -264,9 +273,10 @@ func (m *Manager) stopAsync() error {
 	m.manual = true
 	cmd := m.cmd
 	pid := extPIDOf(cmd)
+	bin := m.bin
 	m.mu.Unlock()
 	m.pushLine("→ 收到停止请求")
-	if stopManaged(cmd, pid) {
+	if stopManaged(cmd, pid, bin) {
 		// watch goroutine 负责置为 Stopped
 		return nil
 	}
@@ -299,7 +309,7 @@ func (m *Manager) Restart(bin, config string) error {
 
 // Attach 接管一个已存在的 gost 进程（例如上次会话残留）。
 // 接管后 State 报 Running，Stop 仍可结束它；但读不到它的输出。
-func (m *Manager) Attach(pid int, started time.Time) error {
+func (m *Manager) Attach(pid int, started time.Time, binary ...string) error {
 	if pid <= 0 {
 		return ErrNoProcess
 	}
@@ -313,6 +323,10 @@ func (m *Manager) Attach(pid int, started time.Time) error {
 	}
 	m.extPID = pid
 	m.extAt = time.Now()
+	m.extBin = ProcessImagePath(pid)
+	if len(binary) > 0 && strings.TrimSpace(binary[0]) != "" {
+		m.extBin = binary[0]
+	}
 	m.state = Running
 	m.manual = false
 	m.errStr = ""
@@ -541,12 +555,12 @@ func (m *Manager) notifySoon() {
 
 // stopManaged 平台相关的停止逻辑：先优雅（信号/CTRL_BREAK），
 // 平台实现内部等待并按需强杀。返回 true 表示进程已确认退出。
-func stopManaged(cmd *exec.Cmd, pid int) bool {
+func stopManaged(cmd *exec.Cmd, pid int, bin string) bool {
 	if cmd == nil || cmd.Process == nil {
 		return true
 	}
 	if runtime.GOOS == "windows" {
-		return stopGostGraceful(pid, 2*time.Second)
+		return stopGostGraceful(pid, 2*time.Second, bin)
 	}
 	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
 		cmd.Process.Kill()

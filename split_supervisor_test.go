@@ -43,6 +43,22 @@ func TestSupervisorWant(t *testing.T) {
 	}
 }
 
+// 连接准备期间插件必须保持“期望运行”，否则 Watch 会把刚拉起的插件停掉。
+func TestSupervisorStartingKeepsWant(t *testing.T) {
+	a := newTestApp(t)
+	s := newSplitSupervisor(a)
+	a.st.Update(func(st *settings.Settings) { st.Split = true })
+
+	s.BeginStart()
+	if !s.Want() {
+		t.Error("准备连接期间应期望插件运行")
+	}
+	s.EndStart()
+	if s.Want() {
+		t.Error("准备结束后 gost 未运行，不应再期望插件运行")
+	}
+}
+
 // 失败退避按 1→2→4→8… 增长，并被上限截断。
 func TestSupervisorBackoff(t *testing.T) {
 	a := newTestApp(t)

@@ -31,8 +31,35 @@ func setupLogging(dir string) (logPath string, closeFn func()) {
 	if err != nil {
 		return "", func() {}
 	}
-	log.SetOutput(io.MultiWriter(os.Stderr, f))
+	// 文件必须排在 stderr 前面：Windows GUI 子系统没有控制台，
+	// stderr 写入会失败，而 io.MultiWriter 遇到第一个错误就返回。
+	// 先写文件，再尝试 stderr，才能保证日志真正落盘。
+	var stderr io.Writer
+	if os.Stderr != nil {
+		stderr = os.Stderr
+	}
+	log.SetOutput(logOutput(f, stderr))
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 	log.Printf("=== mygost %s 启动，数据目录 %s ===", appVersion, dir)
 	return path, func() { _ = f.Close() }
+}
+
+// logOutput 组合文件与控制台输出。
+//
+// stderr 为 nil（Windows GUI 下可能没有标准错误句柄）时只写文件；
+// 非 nil 时忽略它的写入错误，避免控制台问题影响文件日志。
+func logOutput(f io.Writer, stderr io.Writer) io.Writer {
+	if stderr == nil {
+		return f
+	}
+	return io.MultiWriter(f, ignoreWriteError{w: stderr})
+}
+
+// ignoreWriteError 吞掉控制台写入错误，并报告成功字节数，
+// 让 MultiWriter 继续处理后续 writer。
+type ignoreWriteError struct{ w io.Writer }
+
+func (w ignoreWriteError) Write(p []byte) (int, error) {
+	_, _ = w.w.Write(p)
+	return len(p), nil
 }

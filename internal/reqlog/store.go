@@ -124,15 +124,15 @@ func (s *Store) Append(e Entry) {
 	if s.written[key] == fp {
 		return // 内容未变，不重复写
 	}
-	b, err := json.Marshal(line)
-	if err != nil {
-		return
-	}
 	if err := s.rotateLocked(e.At); err != nil {
 		return
 	}
 	if s.count >= s.limit {
-		return // 当天达上限：静默丢弃，界面按记录数提示
+		return // 当天达上限：先判断再 marshal，避免持续消耗 CPU
+	}
+	b, err := json.Marshal(line)
+	if err != nil {
+		return
 	}
 	if _, err := s.w.Write(b); err != nil {
 		return

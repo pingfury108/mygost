@@ -14,7 +14,7 @@ func procAttr() *syscall.SysProcAttr {
 
 // stopGostGraceful unix 的优雅停止桩：SIGTERM 路径已在 stopManaged
 // 里处理（unix 上 Process.Signal 就是优雅信号），这里恒返回已退出。
-func stopGostGraceful(pid int, wait time.Duration) bool {
+func stopGostGraceful(pid int, wait time.Duration, _ ...string) bool {
 	_ = pid
 	_ = wait
 	return true

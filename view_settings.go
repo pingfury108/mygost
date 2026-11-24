@@ -37,7 +37,7 @@ func (a *app) viewSettings(c *ui.Context) {
 						a.splitStatusRow(c)
 						ui.Divider(c)
 						settingRow(c, tr("域名列表", "Domains"), a.domainListDesc(), func() {
-							if a.splitBusy {
+							if a.splitBusy.Load() {
 								ui.Spinner(c)
 							} else {
 								smallButton(c, tr("更新", "Update"), func() { go a.updateSplitLists() })
@@ -45,7 +45,7 @@ func (a *app) viewSettings(c *ui.Context) {
 						})
 						ui.Divider(c)
 						settingRow(c, tr("IP 列表", "IP list"), a.ipListDesc(), func() {
-							if a.splitBusy {
+							if a.splitBusy.Load() {
 								ui.Spinner(c)
 							} else {
 								smallButton(c, tr("更新", "Update"), func() { go a.updateSplitLists() })
@@ -251,7 +251,7 @@ func (a *app) saveAndCheck() {
 
 // listDesc 描述一份规则列表的状态。
 func (a *app) listDesc(count int, at time.Time) string {
-	if a.splitBusy {
+	if a.splitBusy.Load() {
 		return tr("更新中…", "Updating…")
 	}
 	if count < 0 {
@@ -279,7 +279,7 @@ func (a *app) domainListDesc() string {
 // 这里自动重连，避免用户以为设置没起作用。
 func (a *app) onSplitToggled() {
 	a.saveSettings()
-	if a.sSplit && !a.geoM.Ready() && !a.splitBusy {
+	if a.sSplit && !a.geoM.Ready() && !a.splitBusy.Load() {
 		go a.updateSplitLists()
 	}
 	a.reconnectIfRunning()
@@ -300,10 +300,10 @@ func (a *app) reconnectIfRunning() {
 
 // updateSplitLists 在后台更新两份列表（IP 与域名）。
 func (a *app) updateSplitLists() {
-	if a.splitBusy {
+	if !a.splitBusy.CompareAndSwap(false, true) {
 		return
 	}
-	a.win.Update(func() { a.splitBusy = true })
+	a.applyUI(func() {})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
@@ -312,8 +312,8 @@ func (a *app) updateSplitLists() {
 	ips, ipErr := a.geoM.UpdateIPList(ctx, st.SplitIPListURL)
 	domains, domErr := a.geoM.UpdateDomainList(ctx, st.SplitDomainListURL)
 
-	a.win.Update(func() {
-		a.splitBusy = false
+	a.applyUI(func() {
+		a.splitBusy.Store(false)
 		switch {
 		case ipErr != nil:
 			a.pendingToasts = append(a.pendingToasts,
@@ -528,12 +528,20 @@ func (a *app) applyDataDir(next string, migrate bool) {
 	if next == "" {
 		return
 	}
+	// 迁移期间不能再有连接/断开操作在跑：stopGost 在操作槽被占用时
+	// 是静默返回的，继续迁移会让 gost 留在旧目录。
+	if !a.beginOp() {
+		a.toast(tr("正在连接或断开 gost，请稍后再迁移数据目录",
+			"Connect/disconnect in progress; try changing the data directory again"), "error")
+		return
+	}
+	defer a.endOp()
 	a.win.Update(func() { a.pendingDataDir = "" })
 
-	// gost 正在跑时先停：迁移会复制 gost 可执行文件，
-	// 运行中的进程会锁住文件（Windows 上尤其如此）
 	if st, _, _ := a.pm.State(); st == proc.Running {
-		a.stopGost()
+		if !a.stopGostLocked() {
+			return
+		}
 	}
 
 	if migrate {

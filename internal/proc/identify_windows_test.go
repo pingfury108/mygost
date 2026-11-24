@@ -3,7 +3,9 @@
 package proc
 
 import (
+	"net"
 	"os"
+	"os/exec"
 	"testing"
 	"time"
 )
@@ -114,4 +116,79 @@ func TestTerminateRejectsNonGost(t *testing.T) {
 	if !ProcessAlive(os.Getpid()) {
 		t.Fatal("测试进程被误杀")
 	}
+}
+
+func TestIsGostExeCaseInsensitive(t *testing.T) {
+	for _, name := range []string{"gost.exe", "GOST.EXE", "Gost.Exe"} {
+		if !isGostExe(name) {
+			t.Errorf("isGostExe(%q) = false", name)
+		}
+	}
+	if isGostExe("gost2.exe") {
+		t.Error("isGostExe(gost2.exe) = true")
+	}
+}
+
+func TestPortOwnerFindsIPv4AndIPv6(t *testing.T) {
+	cases := []struct {
+		network string
+		addr    string
+	}{
+		{"tcp4", "127.0.0.1:0"},
+		{"tcp6", "[::1]:0"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.network, func(t *testing.T) {
+			ln, err := net.Listen(tc.network, tc.addr)
+			if err != nil {
+				t.Skipf("listen %s: %v", tc.network, err)
+			}
+			defer ln.Close()
+			port := ln.Addr().(*net.TCPAddr).Port
+
+			// netstat 可能比监听建立稍晚可见。
+			deadline := time.Now().Add(2 * time.Second)
+			for time.Now().Before(deadline) {
+				if pid, _ := PortOwner(port); pid == os.Getpid() {
+					return
+				}
+				time.Sleep(50 * time.Millisecond)
+			}
+			pid, _ := PortOwner(port)
+			t.Fatalf("PortOwner(%d) = %d, want %d", port, pid, os.Getpid())
+		})
+	}
+}
+
+// 自定义文件名（不叫 gost.exe）也必须能通过预期路径结束。
+func TestTerminateWithExpectedBinary(t *testing.T) {
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(exe, "-test.run=TestWindowsHelperProcess")
+	cmd.Env = append(os.Environ(), "GO_WANT_HELPER_PROCESS=1")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	defer func() { _ = cmd.Process.Kill() }()
+
+	time.Sleep(100 * time.Millisecond)
+	if err := Terminate(cmd.Process.Pid, exe); err != nil {
+		t.Fatalf("Terminate with expected path: %v", err)
+	}
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("helper process did not exit")
+	}
+}
+
+func TestWindowsHelperProcess(t *testing.T) {
+	if os.Getenv("GO_WANT_HELPER_PROCESS") != "1" {
+		return
+	}
+	time.Sleep(30 * time.Second)
 }

@@ -73,6 +73,22 @@ func (a *app) probeViewModel() viewModel {
 // refreshViewModel 同步刷新一次（UI 线程调用，首帧与事件后使用）。
 func (a *app) refreshViewModel() { a.vm = a.probeViewModel() }
 
+// refreshViewModelAsync 在后台探测后回主线程更新，避免首帧被
+// 端口探活/进程扫描阻塞。
+func (a *app) refreshViewModelAsync() {
+	if a.win == nil {
+		a.refreshViewModel()
+		return
+	}
+	go func() {
+		vm := a.probeViewModel()
+		if a.win == nil || a.win.IsDestroyed() {
+			return
+		}
+		a.win.Update(func() { a.vm = vm })
+	}()
+}
+
 // watchViewModel 启动后台探测循环。没有窗口时（测试、无头渲染）不启动，
 // 由测试直接调 refreshViewModel。
 func (a *app) watchViewModel() {

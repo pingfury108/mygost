@@ -52,13 +52,14 @@ const (
 
 // Manager 托管分流插件进程。
 type Manager struct {
-	opMu   sync.Mutex
-	mu     sync.Mutex
-	dir    string
-	port   int
-	policy Policy
-	cmd    *exec.Cmd
-	cancel context.CancelFunc
+	opMu     sync.Mutex
+	updateMu sync.Mutex
+	mu       sync.Mutex
+	dir      string
+	port     int
+	policy   Policy
+	cmd      *exec.Cmd
+	cancel   context.CancelFunc
 
 	// external 表示当前地址上的插件不是本实例拉起的（上次遗留或别的实例），
 	// 只是复用；Stop 时不应该去杀它。
@@ -475,6 +476,8 @@ func (m *Manager) WaitReady(ctx context.Context, timeout time.Duration) error {
 
 // UpdateIPList 下载国内 IP 列表，返回条目数。
 func (m *Manager) UpdateIPList(ctx context.Context, url string) (int, error) {
+	m.updateMu.Lock()
+	defer m.updateMu.Unlock()
 	if strings.TrimSpace(url) == "" {
 		url = DefaultIPListURL
 	}
@@ -490,6 +493,8 @@ func (m *Manager) UpdateIPList(ctx context.Context, url string) (int, error) {
 
 // UpdateDomainList 下载 geosite 的 cn.json 并转成后缀列表，返回条目数。
 func (m *Manager) UpdateDomainList(ctx context.Context, url string) (int, error) {
+	m.updateMu.Lock()
+	defer m.updateMu.Unlock()
 	if strings.TrimSpace(url) == "" {
 		url = DefaultDomainListURL
 	}

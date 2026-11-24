@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -359,7 +360,7 @@ func (a *app) profileRow(c *ui.Context, p *profiles.Profile, isCurrent, isRunnin
 			// 右侧：菜单
 			menu := iconButton(c, "⋯")
 			menu.Menu(func(m *ui.Menu) {
-				if a.testing {
+				if a.testing.Load() {
 					m.Item(tr("测试中…", "Testing…")).Disabled(true)
 				} else if m.Item(tr("测试连接", "Test connection")).Chosen() {
 					go a.testProfile(p.ID)
@@ -464,24 +465,9 @@ func (a *app) startCurrentNotify(notify bool) bool {
 	}
 
 	p := a.ps.Get(id)
-	// 分流开启：先确保插件就绪，拿到真实地址（8100 被占时会换端口，
-	// 配置里的 split-geo 必须指向它）
-	pluginAddr := a.geoM.Addr()
-	splitEnabled := s.Split && p != nil && p.Kind != profiles.KindCustom
-	if splitEnabled {
-		addr, err := a.ensureGeo()
-		if err != nil {
-			splitEnabled = false
-			if notify {
-				a.toast(tr("分流不可用，按无分流启动: ", "Routing unavailable, starting without it: ")+err.Error(), "error")
-			}
-		} else if addr != "" {
-			pluginAddr = addr
-		}
-	}
 
 	// ① 已有同一个配置的 gost 在跑？直接接管（上次会话残留）
-	if pid, started, ok := a.findOwn(id); ok {
+	if pid, started, ok := a.findOwn(id, p); ok {
 		if err := a.pm.Attach(pid, started); err != nil {
 			if notify {
 				a.toast(tr("接管失败: ", "Attach failed: ")+err.Error(), "error")
@@ -529,6 +515,27 @@ func (a *app) startCurrentNotify(notify bool) bool {
 					tr(" 占用", ""), "error")
 			}
 			return false
+		}
+	}
+
+	// ③ 分流开启：确保插件就绪，拿到真实地址（8100 被占时会换端口，
+	// 配置里的 split-geo 必须指向它）。
+	// 连接动作先占住监管器，避免 gost 启动前 Watch 把刚拉起的插件停掉。
+	pluginAddr := a.geoM.Addr()
+	splitEnabled := s.Split && p != nil && p.Kind != profiles.KindCustom
+	if splitEnabled {
+		if a.splitSup != nil {
+			a.splitSup.BeginStart()
+			defer a.splitSup.EndStart()
+		}
+		addr, err := a.ensureGeo()
+		if err != nil {
+			splitEnabled = false
+			if notify {
+				a.toast(tr("分流不可用，按无分流启动: ", "Routing unavailable, starting without it: ")+err.Error(), "error")
+			}
+		} else if addr != "" {
+			pluginAddr = addr
 		}
 	}
 
@@ -597,6 +604,9 @@ func (a *app) recordPid(profileID, bin, yml string) {
 	if pid <= 0 {
 		return
 	}
+	if abs, err := filepath.Abs(bin); err == nil {
+		bin = abs
+	}
 	started, _, _ := startedAt(a.pm)
 	rec := proc.Record{PID: pid, Profile: profileID, Config: yml, Binary: bin, Started: started}
 	if err := proc.WritePIDFile(a.stateDir(), rec); err != nil {
@@ -609,17 +619,44 @@ func (a *app) clearPid() { proc.RemovePIDFile(a.stateDir()) }
 
 // findOwn 查找属于本应用的、指定配置的 gost 进程。
 // 先看 PID 文件（权威），再用命令行扫描兜底（覆盖旧版本遗留）。
-func (a *app) findOwn(profileID string) (pid int, started time.Time, ok bool) {
+func (a *app) findOwn(profileID string, p *profiles.Profile) (pid int, started time.Time, ok bool) {
 	yml := a.ps.YamlPath(profileID)
 
-	if rec, valid := proc.ReadPIDFile(a.stateDir()); valid && rec.Config == yml {
+	if rec, valid := proc.ReadPIDFile(a.stateDir()); valid && sameConfigPath(rec.Config, yml) {
 		return rec.PID, rec.Started, true
 	}
 	// 兜底：命令行里带这个配置文件的进程
-	for _, p := range proc.FindByConfig(yml, a.gostExeDirs()...) {
-		return p, time.Time{}, true
+	candidates := proc.FindByConfig(yml, a.gostExeDirs()...)
+	if len(candidates) == 0 {
+		return 0, time.Time{}, false
 	}
+	if runtime.GOOS != "windows" {
+		return candidates[0], time.Time{}, true
+	}
+	// Windows 读不到别人的命令行，无法确认候选进程用的是哪个配置。
+	// 只有它正好占着本配置的端口时才接管，避免把另一个配置的 gost
+	// 误认成当前配置。
+	if p != nil {
+		if port := listenPort(p.Listen); port > 0 {
+			owner, _ := proc.PortOwner(port)
+			for _, candidate := range candidates {
+				if candidate == owner {
+					return candidate, time.Time{}, true
+				}
+			}
+		}
+	}
+	log.Printf("Windows 上发现 %d 个 gost，但无法确认配置归属，拒绝自动接管", len(candidates))
 	return 0, time.Time{}, false
+}
+
+// sameConfigPath 比较配置路径；Windows 路径不区分大小写。
+func sameConfigPath(a, b string) bool {
+	a, b = filepath.Clean(a), filepath.Clean(b)
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(a, b)
+	}
+	return a == b
 }
 
 // isOurGost 判断 pid 是否为 mygost 启动的 gost（命令行含 profiles 目录）。
@@ -716,6 +753,12 @@ func (a *app) ensureGeo() (string, error) {
 
 // doDownload 后台下载 gost。
 func (a *app) doDownload() {
+	if runtime.GOOS == "windows" {
+		if st, _, _ := a.pm.State(); st == proc.Running || len(a.leftovers()) > 0 {
+			a.toast("请先停止所有 gost 再更新（Windows 会锁定正在运行的程序）", "error")
+			return
+		}
+	}
 	a.win.Update(func() { a.dlBusy = true; a.dlDone, a.dlTotal = 0, 0 })
 	_, err := a.loc.Download(context.Background(), a.st.Get().Mirror, func(done, total int64) {
 		a.win.Update(func() { a.dlDone, a.dlTotal = done, total })

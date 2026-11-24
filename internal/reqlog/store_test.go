@@ -74,6 +74,22 @@ func TestStoreSkipsIdentical(t *testing.T) {
 	}
 }
 
+// 达到每日上限后不再写盘，也不继续做 JSON 编码。
+func TestStoreStopsAtDailyLimit(t *testing.T) {
+	s := newStore(t)
+	s.limit = 2
+	now := time.Now()
+	for i := 0; i < 5; i++ {
+		s.Append(Entry{At: now, Target: "limit.com", SID: string(rune('a' + i)), Decision: Direct})
+	}
+	s.Flush()
+
+	path := filepath.Join(s.dir, now.Format(dayLayout)+".jsonl")
+	if n := countLines(path); n != 2 {
+		t.Errorf("达到上限后文件行数 = %d, want 2", n)
+	}
+}
+
 // 超过保留期的文件被清理，保留 7 天。
 func TestStorePruneKeepsRetention(t *testing.T) {
 	s := newStore(t)

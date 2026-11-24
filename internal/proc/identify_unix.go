@@ -66,7 +66,7 @@ func ProcessAlive(pid int) bool {
 }
 
 // Terminate 先 SIGTERM，超时后 SIGKILL。
-func Terminate(pid int) error {
+func Terminate(pid int, _ ...string) error {
 	if pid <= 0 {
 		return fmt.Errorf("无效 pid")
 	}

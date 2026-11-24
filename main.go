@@ -110,7 +110,8 @@ type app struct {
 	savedUntil time.Time
 
 	// 连接测试与流量统计
-	testing     bool                      // 正在测试连通性
+	testing     atomic.Bool               // 正在测试连通性
+	testSeq     atomic.Uint64             // 连接测试代际，避免旧定时器清理新结果
 	testResByID map[string][]probe.Result // 各配置的测试结果（内联显示）
 	metricsOK   bool                      // 是否成功抓到数据
 	rates       metrics.Rates             // 最近一次速率
@@ -143,7 +144,7 @@ type app struct {
 	sSplitURL    string
 	sSplitPolicy int // 0=未收录域名走代理 1=按 IP 判断
 	sReqLog      bool
-	splitBusy    bool // 分流列表更新中
+	splitBusy    atomic.Bool // 分流列表更新中
 
 	saveTimer *time.Timer // 文本输入防抖，停顿后才落盘
 
@@ -355,8 +356,9 @@ func main() {
 		a.splitSup.Watch()
 		// 请求记录定期落盘（解析在跟，不能靠退出时才写）
 		a.watchRequests()
-		// 先同步探一次，首帧就有真实状态；之后每 2 秒后台刷新
-		a.refreshViewModel()
+		// 首帧先用默认零值，探测放到后台，避免 600ms 的插件探活
+		// 或进程扫描拖慢窗口出现。之后每 2 秒后台刷新。
+		a.refreshViewModelAsync()
 		a.watchViewModel()
 		a.checkBinAsync()
 		if s.AutoStart && s.Current != "" {
